@@ -1,0 +1,11 @@
+# Versions pinned to the toolchain the project was developed against; a newer
+# minor of torch/triton usually works, but the differential kernel tests are
+# only validated against these.
+
+torch==2.11.0            # model, autograd, bf16 autocast, torch.compile
+triton==3.6.0            # fused kernels; ships with the torch wheel on Linux
+numpy==2.4.2             # uint16 shard packing, host-side math
+tokenizers==0.22.2       # Rust BPE trainer; not used at train time
+datasets==4.0.0          # pull the ClimbMix parts
+huggingface-hub==0.35.0  # dataset download backing datasets/tokenizers
+pytest==9.0.3            # test suite (make test)
