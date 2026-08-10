@@ -9,9 +9,8 @@ AdamW on the embeddings and norms and Muon on the 2-D hidden matrices, in bf16 a
 kernels (RMSNorm, RoPE, SwiGLU, and a chunked cross-entropy that never materializes the full
 logits tensor) each have an eager PyTorch twin, and the whole post-training stack — supervised
 fine-tuning and GRPO — plus a perplexity / ARC / MMLU / HumanEval evaluation harness sit on top.
-It is the training-pipeline sibling of [Mini-CPU](../Mini-CPU), [Mini-TPU](../Mini-TPU), and
-[Mini-GPU](../Mini-GPU), and shares their method: an obviously-correct eager reference is the
-oracle, and every fast custom component is validated by differential testing against it.
+The method throughout: an obviously-correct eager reference is the oracle, and every fast custom
+component is validated by differential testing against it.
 
 Three tiers share one `Config`: `nano` (~12M params, the sub-hour CI run that exercises the full
 pipeline), `mini` (~39M, the default overnight run), and `small` (~124M, a documented stretch).
