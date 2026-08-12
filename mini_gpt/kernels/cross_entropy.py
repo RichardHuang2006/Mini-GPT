@@ -42,33 +42,37 @@ class _ChunkedCrossEntropy(torch.autograd.Function):
     def forward(ctx, hidden, weight, targets, ignore_index, chunk):
         # hidden: [N, d] (activation), weight: [V, d] (tied embedding),
         # targets: [N] int64. Returns mean loss over non-ignored positions.
-        N, _ = hidden.shape
-        V = weight.shape[0]
-        cdtype = _compute_dtype(hidden.dtype)
-        hf = hidden.to(cdtype)
-        wf = weight.to(cdtype)
+        # Disable autocast so the explicit float32 upcast below is honored --
+        # otherwise autocast silently re-downcasts the matmuls to bf16/fp16 and
+        # the running-softmax buffers (fp32) collide with bf16 logits.
+        with torch.autocast(device_type=hidden.device.type, enabled=False):
+            N, _ = hidden.shape
+            V = weight.shape[0]
+            cdtype = _compute_dtype(hidden.dtype)
+            hf = hidden.to(cdtype)
+            wf = weight.to(cdtype)
 
-        valid = targets != ignore_index
-        n_valid = valid.sum().clamp(min=1)
+            valid = targets != ignore_index
+            n_valid = valid.sum().clamp(min=1)
 
-        m = torch.full((N,), float("-inf"), device=hidden.device, dtype=cdtype)
-        s = torch.zeros(N, device=hidden.device, dtype=cdtype)
-        z = torch.zeros(N, device=hidden.device, dtype=cdtype)  # target logits
+            m = torch.full((N,), float("-inf"), device=hidden.device, dtype=cdtype)
+            s = torch.zeros(N, device=hidden.device, dtype=cdtype)
+            z = torch.zeros(N, device=hidden.device, dtype=cdtype)  # target logits
 
-        for c0, c1 in _chunks(V, chunk):
-            logits_c = hf @ wf[c0:c1].T  # [N, cv]
-            chunk_max = logits_c.max(dim=1).values
-            new_m = torch.maximum(m, chunk_max)
-            s = s * torch.exp(m - new_m) + torch.exp(logits_c - new_m[:, None]).sum(dim=1)
-            m = new_m
+            for c0, c1 in _chunks(V, chunk):
+                logits_c = hf @ wf[c0:c1].T  # [N, cv]
+                chunk_max = logits_c.max(dim=1).values
+                new_m = torch.maximum(m, chunk_max)
+                s = s * torch.exp(m - new_m) + torch.exp(logits_c - new_m[:, None]).sum(dim=1)
+                m = new_m
 
-            in_chunk = (targets >= c0) & (targets < c1) & valid
-            if in_chunk.any():
-                z[in_chunk] = logits_c[in_chunk, targets[in_chunk] - c0]
+                in_chunk = (targets >= c0) & (targets < c1) & valid
+                if in_chunk.any():
+                    z[in_chunk] = logits_c[in_chunk, targets[in_chunk] - c0]
 
-        lse = m + torch.log(s)  # [N]
-        loss_row = (lse - z) * valid
-        loss = loss_row.sum() / n_valid
+            lse = m + torch.log(s)  # [N]
+            loss_row = (lse - z) * valid
+            loss = loss_row.sum() / n_valid
 
         ctx.save_for_backward(hidden, weight, targets, lse, valid)
         ctx.n_valid = n_valid
@@ -79,26 +83,27 @@ class _ChunkedCrossEntropy(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_loss):
         hidden, weight, targets, lse, valid = ctx.saved_tensors
-        V = weight.shape[0]
-        chunk = ctx.chunk
-        cdtype = _compute_dtype(hidden.dtype)
-        hf = hidden.to(cdtype)
-        wf = weight.to(cdtype)
+        with torch.autocast(device_type=hidden.device.type, enabled=False):
+            V = weight.shape[0]
+            chunk = ctx.chunk
+            cdtype = _compute_dtype(hidden.dtype)
+            hf = hidden.to(cdtype)
+            wf = weight.to(cdtype)
 
-        scale = grad_loss.to(cdtype) / ctx.n_valid
-        grad_hidden = torch.zeros_like(hf)
-        grad_weight = torch.zeros_like(wf)
-        valid_f = valid.to(cdtype)[:, None]
+            scale = grad_loss.to(cdtype) / ctx.n_valid
+            grad_hidden = torch.zeros_like(hf)
+            grad_weight = torch.zeros_like(wf)
+            valid_f = valid.to(cdtype)[:, None]
 
-        for c0, c1 in _chunks(V, chunk):
-            logits_c = hf @ wf[c0:c1].T
-            p_c = torch.exp(logits_c - lse[:, None])  # softmax prob for this chunk
-            in_chunk = (targets >= c0) & (targets < c1) & valid
-            if in_chunk.any():
-                p_c[in_chunk, targets[in_chunk] - c0] -= 1.0
-            p_c = p_c * valid_f * scale
-            grad_hidden += p_c @ wf[c0:c1]
-            grad_weight[c0:c1] += p_c.T @ hf
+            for c0, c1 in _chunks(V, chunk):
+                logits_c = hf @ wf[c0:c1].T
+                p_c = torch.exp(logits_c - lse[:, None])  # softmax prob for this chunk
+                in_chunk = (targets >= c0) & (targets < c1) & valid
+                if in_chunk.any():
+                    p_c[in_chunk, targets[in_chunk] - c0] -= 1.0
+                p_c = p_c * valid_f * scale
+                grad_hidden += p_c @ wf[c0:c1]
+                grad_weight[c0:c1] += p_c.T @ hf
 
         return grad_hidden.to(hidden.dtype), grad_weight.to(weight.dtype), None, None, None
 
