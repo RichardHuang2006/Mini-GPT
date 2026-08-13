@@ -123,6 +123,7 @@ def group_advantages(rewards: torch.Tensor, groups: torch.Tensor, *, eps: float 
     ``i``. A group whose rewards are all equal has ``std_g == 0`` and mean-centred
     numerator ``0``, so every advantage is exactly ``0`` -- no update.
     """
+    groups = groups.to(rewards.device)  # rewards is built on CPU; groups may be on GPU
     adv = torch.zeros_like(rewards, dtype=torch.float32)
     for g in groups.unique():
         m = groups == g
