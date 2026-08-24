@@ -1,15 +1,15 @@
 """Evaluation harness tests.
 
-Correctness gates:
+Properties checked:
 
 * one call scores a checkpoint on every metric and the results round-trip through
   ``results.json``;
 * held-out perplexity is measured on a ``val`` shard the sampler keeps disjoint
   from ``train``;
-* HumanEval runs generated code in an isolated subprocess that a passing program
+* HumanEval runs generated code in an isolated subprocess: a passing program
   clears, a failing one fails, and an infinite loop is killed by the timeout;
-* the Markdown tables regenerate from ``results.json`` with each metric shown next
-  to its chance baseline and base/SFT/GRPO as separate rows.
+* the Markdown tables regenerate from ``results.json``, with each metric shown
+  next to its chance baseline and base/SFT/GRPO as separate rows.
 """
 
 from __future__ import annotations
@@ -157,7 +157,7 @@ def test_tables(tmp_path):
     assert "chance 25%" in table
     assert "chance 0%" in table
     assert "lower is better" in table  # perplexity column
-    # A chance-level MMLU renders as a percentage, not a bare capability claim.
+    # A chance-level MMLU renders as a percentage.
     assert "25.2%" in table
 
     # Regenerates deterministically from results.json.

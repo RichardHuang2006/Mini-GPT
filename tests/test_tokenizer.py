@@ -1,9 +1,9 @@
 """Tokenizer round-trip, special tokens, and the chat template.
 
-A small tokenizer is trained once per session (session-scoped fixture) on the
-project's own README and source -- enough varied text to exercise merges without
-a network download. The round-trip guarantee is a property of byte-level BPE, so
-it holds at any vocab size.
+A small tokenizer is trained once per session on the project's own README and
+source: enough varied text to exercise merges without a network download. The
+round-trip guarantee is a property of byte-level BPE, so it holds at any vocab
+size.
 """
 
 from __future__ import annotations
@@ -90,8 +90,8 @@ def test_save_and_load_roundtrip(tok, tmp_path):
 
 
 def test_loading_tokenizer_without_specials_raises(tmp_path):
-    # A foreign tokenizer missing our special block must fail loudly, not
-    # silently produce None IDs.
+    # A foreign tokenizer missing the special-token block must fail loudly rather
+    # than silently produce None IDs.
     from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
 
     backend = Tokenizer(models.BPE(unk_token=None))

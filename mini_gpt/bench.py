@@ -1,9 +1,9 @@
 """Throughput / memory / roofline harness.
 
-Measures tokens/s, achieved TFLOPs (and MFU if a device peak is supplied), and
-peak VRAM for a tier, and records the largest feasible micro-batch -- the
-naive-cross-entropy baseline that chunked CE is meant to beat. Uses random token
-data so the benchmark has no data dependency.
+Measures tokens/s, achieved TFLOPs (and MFU when a device peak is supplied), and
+peak VRAM for a tier, plus the largest feasible micro-batch under naive
+cross-entropy versus chunked CE. Uses random token data, so the benchmark has no
+data dependency.
 """
 
 from __future__ import annotations
@@ -28,8 +28,8 @@ from mini_gpt.train.schedule import build_scheduler  # noqa: E402
 def flops_per_token(cfg: Config) -> float:
     """First-order training FLOPs/token: 6*N (fwd+bwd) plus the attention term.
 
-    ``6*N`` is the standard parameter-count approximation; the attention score/
-    value matmuls add ~12 * n_layers * context * d_model that ``6*N`` misses.
+    ``6*N`` is the standard parameter-count approximation; the attention
+    score/value matmuls add the ~12 * n_layers * context * d_model it misses.
     """
     n = cfg.param_count().non_embedding
     attn = 12 * cfg.n_layers * cfg.context * cfg.d_model
@@ -56,7 +56,7 @@ def measure(
 
     model = MiniGPT(cfg).to(device)
     # fused_loss=True streams the vocabulary (chunked CE) instead of materializing
-    # the [mb*ctx, V] logits -- the memory difference this benchmark exists to show.
+    # the [mb*ctx, V] logits -- the memory difference this benchmark reports.
     model.fused_loss = fused_loss
     opt = build_optimizers(model, cfg)
     sched = build_scheduler(opt, cfg)
@@ -117,12 +117,11 @@ def max_microbatch(
 ) -> int:
     """Largest micro-batch that fits.
 
-    With ``fused_loss=False`` this is the naive-CE baseline; with ``True`` it is
-    the chunked-CE path, which should fit a several-fold larger micro-batch.
-    On CUDA, doubles until OOM (or ``cap``); on CPU there is
-    no hard memory wall to probe, so the configured micro-batch is returned
-    unchanged. ``cap`` bounds the probe so a small model with a tiny logits
-    tensor does not march up to absurd batch sizes before hitting the wall.
+    ``fused_loss=False`` gives the naive-CE baseline; ``True`` gives the chunked-CE
+    path, which fits a several-fold larger micro-batch. On CUDA the probe doubles
+    until OOM (or ``cap``); on CPU there is no memory wall to probe, so the
+    configured micro-batch is returned unchanged. ``cap`` bounds the probe so a
+    small model with a tiny logits tensor does not march up to absurd batch sizes.
     """
     device = device or _default_device()
     if device != "cuda":

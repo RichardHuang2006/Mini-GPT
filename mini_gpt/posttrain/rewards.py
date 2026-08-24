@@ -1,25 +1,23 @@
 """GRPO reward functions.
 
-A reward is a **correctness** term (exact match on the final answer, extracted
-from a required delimiter) plus lightweight **format** terms (the completion
-terminated, produced a parseable answer, stayed within length). Format shaping
-gives partial signal before the model is ever correct -- which is what keeps a
-countdown run from stalling at zero reward in its first steps.
+A reward is a correctness term (exact match on the extracted final answer) plus
+lightweight format terms (the completion terminated, produced a parseable answer,
+stayed within length). Format shaping supplies partial signal before the model is
+ever correct, which keeps a countdown run from stalling at zero reward in its
+first steps.
 
-Three tasks share one interface (``RewardResult``):
+Three tasks share the ``RewardResult`` interface:
 
 * ``arithmetic_reward`` -- the final integer must equal the target.
-* ``countdown_reward`` -- an expression that uses the given operands (each at
-  most once) and evaluates to the target; the headline RL task with real signal
-  at 39M.
+* ``countdown_reward`` -- an expression using the given operands (each at most
+  once) that evaluates to the target; the RL task with usable signal at 39M.
 * ``gsm8k_reward`` -- the same final-integer match against a gold answer. Wired
-  for pipeline parity but **documented as near-zero at `mini`**: a model that
-  solves ~0% of grade-school word problems gives GRPO no gradient, and pretending
-  otherwise would make the RL curve meaningless.
+  for pipeline parity; correctness is near-zero at `mini`, since a model solving
+  ~0% of grade-school word problems gives GRPO no gradient.
 
-The final answer is taken from a required ``#### <answer>`` delimiter when present
-(GSM8K convention), else the last integer in the text -- so a model that learns
-the delimiter is rewarded, but a bare number still parses.
+The final answer comes from a ``#### <answer>`` delimiter when present (GSM8K
+convention), else the last integer in the text, so a model that learns the
+delimiter is rewarded while a bare number still parses.
 """
 
 from __future__ import annotations
@@ -162,7 +160,7 @@ def gsm8k_reward(
     """Same final-integer match as arithmetic; near-zero correctness at `mini`.
 
     Kept identical in shape to the other tasks so the harness is complete for the
-    `small` tier, not because `mini` will solve grade-school word problems.
+    `small` tier.
     """
     return arithmetic_reward(
         text,

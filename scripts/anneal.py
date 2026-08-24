@@ -1,9 +1,9 @@
 """Build the anneal-mix shard directory.
 
 Folds math / instruction-formatted data into the base web text at a ratio and
-packs the result into ``uint16`` shards with the *same* tokenizer as the base
-pretraining corpus (the manifest fingerprint must match for the sampler to read
-it). ``scripts/pretrain.py --anneal-data <this dir>`` then switches to it for the
+packs the result into ``uint16`` shards with the same tokenizer as the base
+pretraining corpus; the manifest fingerprint must match for the sampler to read
+it. ``scripts/pretrain.py --anneal-data <this dir>`` then switches to it for the
 last ``anneal_frac`` of the run.
 
     python scripts/anneal.py --base data/climbmix --tokenizer out/tok.json \
@@ -36,7 +36,7 @@ def build_anneal_shards(
 ) -> pack.Manifest:
     """Mix base text with math/instruct docs and pack to shards."""
     if math_docs is None:
-        # A generous upper bound; ``mix_docs`` only pulls as many as it needs.
+        # Upper bound only; ``mix_docs`` pulls just as many as it needs.
         math_docs = synthetic_math_docs(1_000_000, seed=seed)
     mixed = mix_docs(base_docs, math_docs, math_frac=math_frac, seed=seed)
     return pack.pack_corpus(

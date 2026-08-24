@@ -1,8 +1,8 @@
 """RMSNorm.
 
-Root-mean-square normalization with a learned per-channel gain and no bias,
-used in pre-norm placement throughout the model. The eager implementation is a
-two-line reference; the fused Triton version is tested against it.
+Root-mean-square normalization with a learned per-channel gain and no bias, in
+pre-norm placement throughout the model. The fused Triton version is tested
+against the eager implementation here.
 """
 
 from __future__ import annotations
@@ -16,9 +16,9 @@ class RMSNorm(nn.Module):
         super().__init__()
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))
-        # When True, forward routes through the fused kernel (which itself falls
-        # back to this same math off CUDA). Left False so the module is a pure
-        # eager oracle unless a Config explicitly opts in.
+        # When True, forward routes through the fused kernel (which falls back to
+        # this same math off CUDA). Defaults False so the module stays a pure
+        # eager reference unless a Config opts in.
         self.use_triton = use_triton
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

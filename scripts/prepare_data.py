@@ -1,11 +1,10 @@
 """Data-prep entry point: text parts -> tokenizer -> packed uint16 shards.
 
-One command turns a text source into everything the training scripts need: a
-trained byte-level BPE (``--tokenizer``) and a packed shard directory with a
-manifest and a held-out val split (``--data``). Sources mirror
-``mini_gpt.data.download``: ``synthetic`` (offline, deterministic), ``hf-raw``
-(the ClimbMix raw-text mirror), or ``hf-tokens`` (the official token release,
-detokenized with GPT-2).
+Turns a text source into everything the training scripts need: a trained
+byte-level BPE (``--tokenizer``) and a packed shard directory with a manifest and
+a held-out val split (``--data``). Sources mirror ``mini_gpt.data.download``:
+``synthetic`` (offline, deterministic), ``hf-raw`` (the ClimbMix raw-text mirror),
+or ``hf-tokens`` (the official token release, detokenized with GPT-2).
 
     python scripts/prepare_data.py --source synthetic --parts 4 --docs-per-part 20000 \
         --tokenizer data/tok.json --data data/packed --shard-tokens 50000
@@ -29,8 +28,8 @@ from mini_gpt.tokenizer import MiniTokenizer  # noqa: E402
 def iter_docs(parts_dir: str | Path) -> Iterator[str]:
     """Yield the ``text`` field of every document across the jsonl parts.
 
-    Re-reads from disk on each call so the same corpus can be streamed twice
-    (once to train the tokenizer, once to pack) without holding it all in RAM.
+    Re-reads from disk per call, so the corpus can be streamed twice -- once to
+    train the tokenizer, once to pack -- without holding it in RAM.
     """
     for part in sorted(Path(parts_dir).glob("part_*.jsonl")):
         for line in part.read_text(encoding="utf-8").splitlines():
@@ -56,7 +55,7 @@ def main(argv: list[str] | None = None) -> int:
 
     seed_everything(args.seed)
 
-    # 1. text parts (idempotent: existing parts are kept unless --overwrite)
+    # text parts (idempotent: existing parts are kept unless --overwrite)
     written = download.download(
         args.parts_dir,
         parts=args.parts,
@@ -66,14 +65,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(f"parts: {len(written)} in {args.parts_dir}")
 
-    # 2. train + save the byte-level BPE
+    # train + save the byte-level BPE
     tok = MiniTokenizer.train(
         iter_docs(args.parts_dir), vocab_size=args.vocab_size, min_frequency=args.min_frequency
     )
     tok.save(args.tokenizer)
     print(f"tokenizer: {tok.vocab_size} tokens -> {args.tokenizer}")
 
-    # 3. pack to uint16 shards + manifest (with a held-out val split)
+    # pack to uint16 shards + manifest (with a held-out val split)
     manifest = pack.pack_corpus(
         iter_docs(args.parts_dir),
         tok,

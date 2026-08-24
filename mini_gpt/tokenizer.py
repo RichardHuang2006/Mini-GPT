@@ -1,12 +1,11 @@
 """Byte-level BPE tokenizer.
 
-A 32K byte-level BPE. Byte-level means every possible input round-trips: there
-is no out-of-vocabulary token and no ``[UNK]``, which is the precondition for
-the exact-round-trip test.
+A 32K byte-level BPE. Byte-level means every input round-trips exactly: there is
+no out-of-vocabulary token and no ``[UNK]``.
 
-The conversation / tool special tokens are added to the trainer *before*
-training so their IDs are the first, fixed entries in the vocabulary and are
-stable across every tier and every retrain.
+Conversation and tool special tokens are registered with the trainer before
+training, so their IDs are the first, fixed entries in the vocabulary and stay
+stable across every tier and retrain.
 """
 
 from __future__ import annotations
@@ -16,8 +15,8 @@ from typing import Iterable, Sequence
 
 from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
 
-# Order is load-bearing: these occupy IDs 0..N-1 and must never be reordered,
-# or every previously-packed shard and checkpoint would silently shift.
+# These occupy IDs 0..N-1. Reordering them silently shifts every
+# previously-packed shard and checkpoint, so the order is fixed.
 SPECIAL_TOKENS: tuple[str, ...] = (
     "<|pad|>",
     "<|bos|>",
@@ -35,14 +34,14 @@ DEFAULT_VOCAB_SIZE = 32_768
 class MiniTokenizer:
     """Thin wrapper over a HF ``Tokenizer`` with stable special-token IDs.
 
-    Training uses the fast Rust BPE trainer; encode/decode at train time is a
-    plain byte-level pass with no special-token handling unless asked.
+    Training uses the Rust BPE trainer; encode/decode is a plain byte-level pass
+    with no special-token handling unless requested.
     """
 
     def __init__(self, backend: Tokenizer):
         self._tok = backend
-        # Cache special-token IDs; assert they resolved (a load of a foreign
-        # tokenizer without these would be a hard error, not a silent None).
+        # Cache special-token IDs. Loading a foreign tokenizer without them is a
+        # hard error rather than a silent None.
         self.special_ids: dict[str, int] = {}
         for tok in SPECIAL_TOKENS:
             tid = self._tok.token_to_id(tok)
@@ -61,8 +60,8 @@ class MiniTokenizer:
     ) -> "MiniTokenizer":
         """Train a byte-level BPE on an iterable of text strings."""
         backend = Tokenizer(models.BPE(unk_token=None))
-        # add_prefix_space=False keeps encode->decode an exact identity; the
-        # ByteLevel alphabet guarantees all 256 bytes are representable.
+        # add_prefix_space=False keeps encode->decode an exact identity, and the
+        # ByteLevel alphabet makes all 256 bytes representable.
         backend.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
         backend.decoder = decoders.ByteLevel()
 
@@ -107,8 +106,8 @@ class MiniTokenizer:
     def fingerprint(self) -> str:
         """A stable content hash of the tokenizer.
 
-        The manifest records this so a packed shard set can be checked against
-        the exact tokenizer that produced it.
+        Recorded in the manifest so a packed shard set can be checked against the
+        exact tokenizer that produced it.
         """
         import hashlib
 

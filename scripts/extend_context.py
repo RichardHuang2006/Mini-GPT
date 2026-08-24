@@ -1,10 +1,10 @@
 """Context extension 1024 -> 2048.
 
 A short continued-training phase at a longer context with a rescaled RoPE base.
-Nothing about the weights is tied to a context length -- RoPE carries position at
-runtime and there is no learned positional table -- so the base checkpoint loads
-directly into a longer-context config; the only change is ``context`` and the
-NTK-rescaled ``rope_base``, which the continued training adapts to.
+No weight is tied to a context length -- RoPE carries position at runtime and
+there is no learned positional table -- so a base checkpoint loads directly into a
+longer-context config. The only changes are ``context`` and the NTK-rescaled
+``rope_base``, which the continued training adapts to.
 
     python scripts/extend_context.py --tier mini --data data/packed_2k \
         --init out/mini/ckpt_final.pt --out out/mini_2k --new-context 2048 --steps 2000
@@ -34,13 +34,13 @@ from mini_gpt.train.schedule import build_scheduler  # noqa: E402
 def extended_config(cfg: Config, new_context: int) -> Config:
     """A copy of ``cfg`` at ``new_context`` with an NTK-rescaled RoPE base."""
     new_base = scale_rope_base(cfg.rope_base, cfg.context, new_context, cfg.head_dim)
-    # The sliding window is unchanged, so windowed layers keep bounded attention
-    # cost at the longer context while full layers pay the quadratic price.
+    # The window is unchanged, so windowed layers keep bounded attention cost at
+    # the longer context while full layers pay the quadratic price.
     return cfg.with_overrides(context=new_context, rope_base=new_base)
 
 
 def load_base_weights(model: MiniGPT, init_path: str, device: str) -> None:
-    """Load model weights from a pretrain checkpoint (weights only, fresh optim)."""
+    """Load weights from a pretrain checkpoint; optimizer state starts fresh."""
     payload = torch.load(init_path, map_location=device, weights_only=False)
     state = payload["trainer"]["model"] if "trainer" in payload else payload["model"]
     model.load_state_dict(state)

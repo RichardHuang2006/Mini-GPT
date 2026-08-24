@@ -1,19 +1,19 @@
 """Chunked cross-entropy.
 
-The single load-bearing kernel. A naive ``F.cross_entropy`` on a ``mini``
-micro-batch materializes a ``[B·T, V] = [16·1024, 32768]`` logits tensor
-(~1 GB bf16) plus its fp32 softmax upcast and gradient (~4.3 GB total), which
-caps the micro-batch far below what compute allows. Here the vocabulary is tiled
-into chunks and streamed with an online-softmax running max / sum-of-exp, so peak
-memory drops from ``O(B·T·V)`` to ``O(B·T·chunk)``.
+A naive ``F.cross_entropy`` on a ``mini`` micro-batch materializes a
+``[B·T, V] = [16·1024, 32768]`` logits tensor (~1 GB bf16) plus its fp32 softmax
+upcast and gradient (~4.3 GB total), capping the micro-batch far below what
+compute allows. Here the vocabulary is tiled and streamed with an online-softmax
+running max / sum-of-exp, dropping peak memory from ``O(B·T·V)`` to
+``O(B·T·chunk)``.
 
-The math is exact cross-entropy, so the value and the input gradient match
-``F.cross_entropy`` to floating-point tolerance regardless of ``chunk`` -- that
-independence is what ``test_chunked_ce`` asserts, alongside the peak-memory delta.
+The math is exact cross-entropy, so the value and input gradient match
+``F.cross_entropy`` to floating-point tolerance for any ``chunk``; that
+independence is what ``test_chunked_ce`` asserts alongside the peak-memory delta.
 
-Implemented as a pure-PyTorch autograd ``Function`` (the per-chunk work is cuBLAS
-GEMMs + reductions, which are already at peak; the win is memory, not a hand
-kernel). Runs identically on CPU and CUDA.
+Implemented as a pure-PyTorch autograd ``Function``: the per-chunk work is cuBLAS
+GEMMs plus reductions, already at peak, so the win is memory rather than a hand
+kernel. Runs identically on CPU and CUDA.
 """
 
 from __future__ import annotations
@@ -42,9 +42,9 @@ class _ChunkedCrossEntropy(torch.autograd.Function):
     def forward(ctx, hidden, weight, targets, ignore_index, chunk):
         # hidden: [N, d] (activation), weight: [V, d] (tied embedding),
         # targets: [N] int64. Returns mean loss over non-ignored positions.
-        # Disable autocast so the explicit float32 upcast below is honored --
-        # otherwise autocast silently re-downcasts the matmuls to bf16/fp16 and
-        # the running-softmax buffers (fp32) collide with bf16 logits.
+        # Autocast is disabled so the explicit float32 upcast below is honored:
+        # otherwise autocast re-downcasts the matmuls to bf16/fp16 and the fp32
+        # running-softmax buffers collide with bf16 logits.
         with torch.autocast(device_type=hidden.device.type, enabled=False):
             N, _ = hidden.shape
             V = weight.shape[0]
@@ -60,7 +60,7 @@ class _ChunkedCrossEntropy(torch.autograd.Function):
             z = torch.zeros(N, device=hidden.device, dtype=cdtype)  # target logits
 
             for c0, c1 in _chunks(V, chunk):
-                logits_c = hf @ wf[c0:c1].T  # [N, cv]
+                logits_c = hf @ wf[c0:c1].T  # [N, c1 - c0]
                 chunk_max = logits_c.max(dim=1).values
                 new_m = torch.maximum(m, chunk_max)
                 s = s * torch.exp(m - new_m) + torch.exp(logits_c - new_m[:, None]).sum(dim=1)

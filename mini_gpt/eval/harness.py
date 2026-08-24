@@ -1,23 +1,21 @@
 """Evaluation harness: perplexity / ARC / MMLU / HumanEval.
 
-One command scores a checkpoint on every metric and writes ``results.json`` plus
-Markdown tables. The design is explicit about which numbers carry information at
-39M: held-out **perplexity** and **ARC-Easy** are the only two with real signal;
-MMLU is a chance-level regression tripwire and HumanEval is effectively zero.
-Every score is printed next to its chance baseline so a 25% MMLU is never
-mistaken for a result.
+One call scores a checkpoint on every metric and writes ``results.json`` plus
+Markdown tables. At 39M, held-out perplexity and ARC-Easy are the metrics with
+usable signal; MMLU serves as a chance-level regression tripwire and HumanEval is
+effectively zero. Every score is reported next to its chance baseline.
 
 Scoring methods:
 
-* **Perplexity** -- token-weighted ``exp(mean NLL)`` over windows drawn from a
-  shard split the model never trained on (the fixed train/val split guarantees
-  this; see ``mini_gpt.data.sampler``).
-* **Multiple choice** (ARC, MMLU) -- each choice scored by its **length-normalized
-  log-likelihood** given the question; the argmax is the prediction.
-* **HumanEval** -- the model's completion is executed in an **isolated subprocess
-  with a timeout** against the task's unit test; pass@1 is the fraction that exit
-  cleanly. Sandboxing keeps a generated infinite loop or crash from taking the
-  harness down with it.
+* Perplexity -- token-weighted ``exp(mean NLL)`` over windows drawn from a shard
+  split the model never trained on, guaranteed by the fixed train/val split (see
+  ``mini_gpt.data.sampler``).
+* Multiple choice (ARC, MMLU) -- each choice scored by its length-normalized
+  log-likelihood given the question; the argmax is the prediction.
+* HumanEval -- the model's completion is executed in an isolated subprocess with a
+  timeout against the task's unit test; pass@1 is the fraction that exit cleanly.
+  Sandboxing keeps a generated infinite loop or crash from taking the harness down
+  with it.
 """
 
 from __future__ import annotations
@@ -62,7 +60,7 @@ def evaluate_perplexity(
 ) -> float:
     """Token-weighted perplexity over ``[N, T+1]`` windows (input+shifted target).
 
-    Windows must come from a split the model never trained on -- the caller draws
+    Windows must come from a split the model never trained on; the caller draws
     them from a validation ``ShardSampler``.
     """
     model.eval()
@@ -159,7 +157,7 @@ def evaluate_multiple_choice(
 @dataclass
 class HumanEvalProblem:
     prompt: str        # the function signature + docstring the model completes
-    test: str          # defines `def check(candidate): ...` with asserts
+    test: str          # defines `check(fn)`, asserting against the completion
     entry_point: str   # the function name to pass to check()
 
 
@@ -195,7 +193,7 @@ def evaluate_humaneval(
     max_new_tokens: int = 256,
     timeout: float = 5.0,
 ) -> float:
-    """pass@1 over ``problems``; ~0% at `mini` but the loop is wired end-to-end."""
+    """pass@1 over ``problems``; ~0% at `mini`, but the loop runs end to end."""
     from mini_gpt.generate import generate
 
     model.eval()
@@ -302,7 +300,7 @@ def format_tables(checkpoints: dict[str, dict[str, float]]) -> str:
     """Render the Markdown results table with chance baselines in the header.
 
     Rows are checkpoints in training order (base, SFT, GRPO); columns are metrics,
-    each labelled with its chance baseline so a chance-level score reads as such.
+    each labelled with its chance baseline.
     """
     present = [m for m in _METRICS if any(m[0] in v for v in checkpoints.values())]
     headers = ["Checkpoint"] + [_header_label(k, lbl, lb) for k, lbl, lb in present]

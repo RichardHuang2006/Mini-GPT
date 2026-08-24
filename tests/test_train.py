@@ -1,10 +1,10 @@
 """Config presets, determinism, and the training loop.
 
-Covers the two pieces of scaffolding everything else depends on (the tier
-presets and the seeding harness), then the training loop itself: parameter
-groups, the LR schedule, gradient accumulation, checkpoint/resume equivalence,
-the Muon optimizer, ``torch.compile`` equivalence, the throughput harness, the
-anneal switch, and context extension.
+Covers the scaffolding everything else depends on (tier presets, the seeding
+harness), then the training loop: parameter groups, the LR schedule, gradient
+accumulation, checkpoint/resume equivalence, the Muon optimizer,
+``torch.compile`` equivalence, the throughput harness, the anneal switch, and
+context extension.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ def test_all_tiers_instantiate():
 @pytest.mark.parametrize("name", ["nano", "mini", "small"])
 def test_derived_dimension_invariant(name):
     cfg = TIERS[name]
-    # The load-bearing shape invariant.
+    # The core shape invariant.
     assert cfg.d_model == cfg.n_q_heads * cfg.head_dim
     assert cfg.n_q_heads % cfg.n_kv_heads == 0
     assert cfg.mlp_hidden == swiglu_hidden(cfg.d_model)
@@ -101,8 +101,8 @@ def test_seeded_random_is_reproducible():
 
 
 def test_two_forward_passes_bit_identical():
-    # Two forward passes on the same seeded input are bit-identical. Uses a
-    # tiny torch module so it runs CPU-only.
+    # Two forward passes on the same seeded input are bit-identical. A tiny torch
+    # module keeps this CPU-only.
     torch = pytest.importorskip("torch")
 
     def run():
@@ -372,9 +372,9 @@ def test_muon_converges_faster_per_token(packed_tiny):
     def mean(xs, a, b):
         return sum(xs[a:b]) / (b - a)
 
-    # Muon conditions the 2D-weight update and reaches a lower
-    # loss for the same tokens than the pure-AdamW baseline. Measured over the
-    # descent window (the synthetic task plateaus near its entropy floor).
+    # Muon conditions the 2D-weight update and reaches a lower loss for the same
+    # tokens than the pure-AdamW baseline. Measured over the descent window, since
+    # the synthetic task plateaus near its entropy floor.
     assert mean(muon, 10, steps) < mean(adamw, 10, steps), (
         f"muon {mean(muon, 10, steps):.3f} vs adamw {mean(adamw, 10, steps):.3f}"
     )
@@ -435,9 +435,9 @@ def test_bench_chunked():
     if torch.cuda.is_available():
         # The chunked-CE memory win, measured directly: at the same micro-batch on
         # the real 32K-vocab tier, chunked CE never materializes the [mb*ctx, V]
-        # logits, so its peak VRAM is strictly below the naive path's. (A full
-        # max-micro-batch scan is what `bench.py --scan-microbatch` is for; here
-        # we keep the assertion to two cheap steps.)
+        # logits, so its peak VRAM is strictly below the naive path's. A full
+        # max-micro-batch scan is `bench.py --scan-microbatch`; this assertion
+        # stays at two cheap steps.
         gpu_cfg = get_config("nano")
         naive = bench.measure(gpu_cfg, steps=1, warmup=0, device="cuda", micro_batch=8, fused_loss=False)
         chunked = bench.measure(gpu_cfg, steps=1, warmup=0, device="cuda", micro_batch=8, fused_loss=True)
@@ -558,8 +558,8 @@ def test_extended_config_rescales_and_lengthens():
 
 
 def test_base_weights_transfer_to_longer_context(packed_tiny):
-    # No learned positional table, so a model's weights load into a longer-context
-    # config unchanged and forward runs at the new length.
+    # With no learned positional table, weights load into a longer-context config
+    # unchanged and forward runs at the new length.
     cfg = _tiny_cfg(context=16)
     seed_everything(0)
     base = MiniGPT(cfg)

@@ -4,5 +4,5 @@ __pycache__/
 .venv/
 venv/
 out/
-data/
+/data/
 *.egg-info/

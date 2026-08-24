@@ -2,14 +2,14 @@
 
 Two kinds of checks:
 
-* **Reference math is correct** -- an fp64 ``gradcheck`` on the analytic definition
-  each kernel implements (runs on CPU, no GPU needed).
-* **The kernel equals the reference** -- forward value and backward gradient match
-  the eager op on CUDA, in fp32 (tight) and bf16 (loose); plus a 200-step
-  fixed-seed training-equivalence run and the chunked-CE peak-memory delta.
+* Reference math is correct -- an fp64 ``gradcheck`` on the analytic definition
+  each kernel implements; CPU-only, no GPU needed.
+* The kernel equals the reference -- forward value and backward gradient match the
+  eager op on CUDA, in fp32 (tight) and bf16 (loose), plus a fixed-seed
+  training-equivalence run and the chunked-CE peak-memory delta.
 
-The kernels fall back to eager off CUDA, so the "kernel vs eager" assertions are
-only meaningful on a GPU and are marked ``requires_cuda``. The chunked-CE
+The kernels fall back to eager off CUDA, so the kernel-vs-eager assertions are
+meaningful only on a GPU and are marked ``requires_cuda``. The chunked-CE
 correctness check is pure PyTorch and runs everywhere.
 """
 
@@ -136,7 +136,7 @@ def test_chunked_ce_peak_memory_scales_with_chunk():
 
 
 # ==========================================================================
-# Steps 6.1-6.3 -- Triton kernels match the eager op on CUDA
+# Triton kernels match the eager op on CUDA
 # ==========================================================================
 
 @requires_cuda
@@ -239,13 +239,12 @@ def _equiv_cfg(**overrides) -> Config:
 @requires_cuda
 def test_training_equivalence():
     # The fully-fused path (Triton norms/rope/swiglu + chunked CE) must track the
-    # eager path's loss curve. We overfit one fixed
-    # batch for 80 steps: unlike a stream of random-token batches -- which is
-    # unlearnable and just jitters at the entropy floor where fp rounding is
-    # chaotic -- overfitting is contractive, so the tiny fp difference between the
-    # two paths stays bounded and the curves are effectively identical. SDPA's
-    # memory-efficient backward is non-deterministic, so both runs pin the
-    # deterministic math backend, isolating the kernels as the only difference.
+    # eager path's loss curve. Overfitting one fixed batch for 80 steps is
+    # contractive, so the tiny fp difference between the two paths stays bounded;
+    # a stream of random-token batches is unlearnable and would hover at the
+    # entropy floor, where fp rounding dominates. SDPA's memory-efficient backward
+    # is non-deterministic, so both runs pin the deterministic math backend,
+    # leaving the kernels as the only difference.
     from torch.nn.attention import SDPBackend, sdpa_kernel
 
     torch.backends.cuda.matmul.allow_tf32 = False
@@ -285,8 +284,8 @@ def test_training_equivalence():
 
 
 def test_fused_loss_matches_eager_loss_cpu():
-    # On CPU the kernels fall back to eager, but the fused-loss *plumbing*
-    # (chunked CE returning None logits) must still equal F.cross_entropy.
+    # On CPU the kernels fall back to eager, but the fused-loss plumbing (chunked
+    # CE returning None logits) must still equal F.cross_entropy.
     cfg = _equiv_cfg()
     seed_everything(0)
     model = MiniGPT(cfg)

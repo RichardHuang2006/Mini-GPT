@@ -2,14 +2,13 @@
 
 * Queries use the full head count; keys/values a smaller one (GQA), repeated to
   match at attention time.
-* Queries and keys are RMS-normalized per head before RoPE (QK-norm), which
-  bounds attention-logit magnitude -- the cheapest single stabilizer for small
-  models.
+* Queries and keys are RMS-normalized per head before RoPE (QK-norm), bounding
+  attention-logit magnitude.
 * A layer is either full-causal or sliding-window (window ``w``): position i
   attends to j iff ``j <= i`` and ``i - j < w``.
 
-Attention itself uses ``F.scaled_dot_product_attention`` -- the stock op the
-eager oracle is allowed to lean on; a fused-attention kernel is future work.
+The score/value product itself is ``F.scaled_dot_product_attention``; a fused
+attention kernel is out of scope.
 """
 
 from __future__ import annotations
@@ -109,9 +108,9 @@ class Attention(nn.Module):
         mask = build_attn_mask(t, self.window, device=x.device)
         if seg_equal is not None:
             # Block attention across packed conversation boundaries: a query may
-            # attend to a key only if they share a segment. The
-            # causal diagonal is always allowed, so no query row is fully masked
-            # (padding attends to itself), avoiding a NaN softmax row.
+            # attend to a key only if they share a segment. The causal diagonal
+            # is always allowed, so no query row is fully masked (padding
+            # attends to itself), avoiding a NaN softmax row.
             mask = mask.view(1, 1, t, t) & seg_equal.view(b, 1, t, t)
         out = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
 

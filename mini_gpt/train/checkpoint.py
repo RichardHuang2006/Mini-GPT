@@ -1,10 +1,9 @@
 """Checkpoint + resume.
 
-A checkpoint saves the model weights, optimizer(s) state, scheduler state, the
-data-sampler position, the step counter, and RNG state, so a killed overnight
-run resumes without replaying tokens and produces the same trajectory as an
-uninterrupted run. The data stream's state (sampler position) is saved
-alongside the trainer so resume does not repeat or skip windows.
+A checkpoint holds the model weights, optimizer(s) state, scheduler state, data
+sampler position, step counter, and RNG state, so a killed run resumes to the
+same trajectory as an uninterrupted one. The sampler position is saved alongside
+the trainer, so resume neither repeats nor skips windows.
 """
 
 from __future__ import annotations

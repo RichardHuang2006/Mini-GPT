@@ -32,11 +32,11 @@ from mini_gpt.train.schedule import build_scheduler  # noqa: E402
 def build_training(cfg, data_dir: str, device: str, *, anneal_dir: str | None = None, steps: int | None = None):
     """Assemble (trainer, train_data, val_data) for a tier + packed data dir.
 
-    When ``anneal_dir`` is given, ``train_data`` is an ``AnnealDataStream`` that
+    With ``anneal_dir`` given, ``train_data`` is an ``AnnealDataStream`` that
     switches to the anneal mix for the last ``cfg.anneal_frac`` of ``steps``.
     """
     raw_model = MiniGPT(cfg).to(device)
-    # Fused chunked-CE loss when kernels are on: the batch-size unlock.
+    # Chunked-CE loss whenever the kernels are on.
     raw_model.fused_loss = getattr(cfg, "use_triton", False)
     model = maybe_compile(raw_model, cfg)
     optimizer = build_optimizers(raw_model, cfg)
@@ -88,8 +88,8 @@ def evaluate(trainer: Trainer, val_data: DataStream, iters: int = 20) -> float:
 def eval_perplexity(trainer: Trainer, cfg, data_dir: str, device: str, n_windows: int) -> float:
     """Held-out perplexity via the eval harness.
 
-    Scored on the ``val`` split -- shards the sampler keeps disjoint from training
-    -- so this is the same number ``scripts/eval.py`` reports, logged in-loop.
+    Scored on the ``val`` split, whose shards the sampler keeps disjoint from
+    training, so this is the number ``scripts/eval.py`` reports, logged in-loop.
     """
     from mini_gpt.eval.harness import perplexity_from_split
 
@@ -117,6 +117,13 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     cfg = get_config(args.tier)
+    if args.steps is not None:
+        # Keep the LR schedule in sync with the run length: cosine decay is built
+        # from cfg.max_steps, so an unsynced --steps override would leave the LR
+        # high at the end of a shortened run.
+        cfg = cfg.with_overrides(
+            max_steps=args.steps, warmup_steps=min(cfg.warmup_steps, max(1, args.steps // 10))
+        )
     seed_everything(cfg.seed)
     steps = args.steps if args.steps is not None else cfg.max_steps
 

@@ -1,15 +1,14 @@
 """Autoregressive generation.
 
 Greedy and temperature sampling, shared by the SFT smoke test, the evaluation
-harness, and GRPO rollouts -- one generator so sampled completions are formatted
-exactly like training data. Generation is a plain re-run of the forward pass on
-the growing sequence (no KV cache yet; a paged-KV server is future scope);
-correctness and determinism matter here, speed does not.
+harness, and GRPO rollouts, so sampled completions are formatted exactly like
+training data. Generation re-runs the forward pass over the growing sequence; no
+KV cache, since correctness and determinism are what matter here.
 
-Determinism: with ``temperature == 0`` sampling is greedy (argmax) and exactly
-reproducible; with ``temperature > 0`` a per-call ``torch.Generator`` seeded by
-``seed`` makes the draw reproducible too. Each sequence stops contributing new
-content once it emits ``<|eos|>``; the whole batch halts when all sequences have.
+With ``temperature == 0`` sampling is greedy (argmax) and exactly reproducible;
+with ``temperature > 0`` a per-call ``torch.Generator`` seeded by ``seed`` makes
+the draw reproducible as well. A sequence stops contributing new content once it
+emits ``<|eos|>``, and the batch halts when every sequence has.
 """
 
 from __future__ import annotations
@@ -36,8 +35,8 @@ def generate(
 ) -> torch.Tensor:
     """Extend ``idx`` ``[B, T0]`` by up to ``max_new_tokens`` tokens.
 
-    Returns the full ``[B, T0 + n]`` sequence (prompt included). Rows that emit
-    ``eos_id`` are padded with ``eos_id`` thereafter and the loop exits early once
+    Returns the full ``[B, T0 + n]`` sequence, prompt included. A row that emits
+    ``eos_id`` is padded with ``eos_id`` thereafter, and the loop exits early once
     every row has finished.
     """
     model.eval()
@@ -67,7 +66,7 @@ def generate(
             next_tok = torch.multinomial(probs, num_samples=1, generator=gen).squeeze(-1)
 
         if eos_id is not None:
-            # A finished row keeps emitting eos so its content is frozen.
+            # A finished row keeps emitting eos, freezing its content.
             next_tok = torch.where(finished, torch.full_like(next_tok, eos_id), next_tok)
 
         idx = torch.cat([idx, next_tok[:, None]], dim=1)
@@ -94,9 +93,9 @@ def generate_reply(
 ) -> str:
     """Prompt the model through the chat template and decode the assistant reply.
 
-    Uses ``build_prompt`` (the single source of the chat format), so a sampled
-    reply is formatted identically to SFT training data. Returns the decoded text
-    of the new tokens, stopped at the first ``<|eos|>``.
+    Uses ``build_prompt``, the single source of the chat format, so a sampled reply
+    is formatted identically to SFT training data. Returns the decoded new tokens,
+    truncated at the first ``<|eos|>``.
     """
     prompt = build_prompt(messages, tokenizer)
     idx = torch.tensor([prompt], dtype=torch.long, device=next(model.parameters()).device)

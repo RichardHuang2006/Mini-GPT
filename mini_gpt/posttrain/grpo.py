@@ -1,17 +1,17 @@
 """GRPO: group-relative policy optimization.
 
-For each prompt the policy samples a **group** of ``G`` completions, each scored
-by a reward function; the advantage is the reward normalized *within its group*
-(the group mean is the baseline -- no learned critic), which is what makes GRPO
-cheap enough for a single card. The policy update is the clipped PPO surrogate on
-the completion tokens only.
+For each prompt the policy samples a group of ``G`` completions, each scored by a
+reward function. The advantage is the reward normalized within its group, using
+the group mean as the baseline instead of a learned critic, which is what makes
+GRPO cheap enough for a single card. The policy update is the clipped PPO
+surrogate over completion tokens only.
 
-The degenerate case the group baseline must handle: a **zero-variance group**
-(all rewards equal) has zero advantage and therefore produces no gradient -- the
-model is neither pushed toward nor away from equally-good samples.
+Degenerate case: a zero-variance group (all rewards equal) has zero advantage and
+so produces no gradient, pushing the model neither toward nor away from
+equally-good samples.
 
-Sampling reuses the generator (``mini_gpt.generate``) verbatim, so a GRPO
-rollout is formatted exactly like SFT training data and there is only one sampler.
+Sampling reuses ``mini_gpt.generate`` verbatim, so a GRPO rollout is formatted
+exactly like SFT training data and there is only one sampler.
 """
 
 from __future__ import annotations
@@ -57,8 +57,8 @@ def sample_groups(
 ) -> list[Completion]:
     """Sample ``group_size`` completions for each prompt via ``generate``.
 
-    Seeded and reproducible: the same ``seed`` reproduces the same completions.
-    Each prompt uses a distinct sub-seed so groups differ.
+    The same ``seed`` reproduces the same completions; each prompt uses a distinct
+    sub-seed so groups differ.
     """
     eos = tokenizer.eos_id
     out: list[Completion] = []
@@ -120,8 +120,8 @@ def group_advantages(rewards: torch.Tensor, groups: torch.Tensor, *, eps: float 
     """Reward normalized within each group; zero for a zero-variance group.
 
     ``A_i = (r_i - mean_g) / (std_g + eps)`` over the group ``g`` of completion
-    ``i``. A group whose rewards are all equal has ``std_g == 0`` and mean-centred
-    numerator ``0``, so every advantage is exactly ``0`` -- no update.
+    ``i``. A group with all-equal rewards has ``std_g == 0`` and a mean-centred
+    numerator of ``0``, so every advantage is exactly ``0`` and no update occurs.
     """
     groups = groups.to(rewards.device)  # rewards is built on CPU; groups may be on GPU
     adv = torch.zeros_like(rewards, dtype=torch.float32)
@@ -209,7 +209,7 @@ def run_grpo(
     seed: int = 0,
     device: torch.device | str = "cpu",
 ) -> list[float]:
-    """Run GRPO and return the mean reward per step (the rising RL curve).
+    """Run GRPO and return the mean reward per step.
 
     ``prompt_bank`` is a list of ``(messages, reward_fn)`` pairs; each step samples
     ``prompts_per_step`` of them, rolls out ``group_size`` completions each, scores

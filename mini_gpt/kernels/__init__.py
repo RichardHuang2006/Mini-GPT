@@ -1,15 +1,15 @@
 """Fused Triton kernels.
 
-Each kernel is a drop-in replacement for an eager op, tested against its eager
-twin (the frozen reference model). Every public function here falls back to a
+Each kernel is a drop-in replacement for an eager op and is tested against its
+eager twin in the reference model. Every public function falls back to a
 pure-PyTorch path when Triton or CUDA is unavailable, so ``use_triton=True`` is
-safe on a CPU box -- it simply runs the reference math. The selection is:
+safe on a CPU box -- it runs the reference math. Dispatch is:
 
     Triton kernel   iff   input is on CUDA and Triton imported successfully
     eager fallback  otherwise
 
-so the *value* is identical on both paths -- exactly what the differential tests
-in ``tests/test_kernels.py`` assert on GPU.
+Both paths produce the same value, which is what the differential tests in
+``tests/test_kernels.py`` assert on GPU.
 """
 
 from __future__ import annotations

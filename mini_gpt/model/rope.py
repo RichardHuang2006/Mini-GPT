@@ -1,12 +1,11 @@
 """Rotary position embedding.
 
-Position is injected by rotating query/key head pairs, so the model carries no
-learned positional table and context length is a runtime choice. The RoPE base
-frequency is the single knob the context-extension phase rescales to stretch
-1024 -> 2048.
+Position is injected by rotating query/key head pairs, so there is no learned
+positional table and context length is a runtime choice. The RoPE base frequency
+is the only knob context extension rescales (1024 -> 2048).
 
-Standard Llama-style formulation: frequencies are duplicated to the full head
-dimension and applied as ``x * cos + rotate_half(x) * sin``.
+Llama-style formulation: frequencies are duplicated to the full head dimension
+and applied as ``x * cos + rotate_half(x) * sin``.
 """
 
 from __future__ import annotations
@@ -38,12 +37,11 @@ def precompute_rope(
 def scale_rope_base(base: float, old_ctx: int, new_ctx: int, head_dim: int) -> float:
     """NTK-aware RoPE base for extending context ``old_ctx -> new_ctx``.
 
-    Extending the context by a factor ``s = new_ctx/old_ctx`` by *stretching the
-    base frequency* (rather than interpolating positions) keeps high-frequency
-    resolution while lengthening the low-frequency wavelength. The standard NTK
-    scaling multiplies the base by ``s ** (d/(d-2))``; a short continued-training
-    phase then adapts the model to the new base. Returns ``base`` unchanged when
-    ``new_ctx <= old_ctx``.
+    Stretching the base frequency by ``s = new_ctx/old_ctx``, rather than
+    interpolating positions, keeps high-frequency resolution while lengthening
+    the low-frequency wavelength. NTK scaling multiplies the base by
+    ``s ** (d/(d-2))``; a short continued-training phase adapts the model to the
+    new base. Returns ``base`` unchanged when ``new_ctx <= old_ctx``.
     """
     if new_ctx <= old_ctx:
         return base

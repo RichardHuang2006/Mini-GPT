@@ -1,10 +1,9 @@
 """The decoder-only transformer.
 
 Pre-norm blocks, tied input/output embeddings, GPT-2 residual-scaled init, and a
-forward that returns cross-entropy loss. The parameter count computed here (via
-``torch``) matches ``Config.param_count`` exactly, because both count the same
-weights: tied embeddings, per-head QK-norm gains, two RMSNorm gains per layer
-plus a final one, and no biases.
+forward that returns cross-entropy loss. ``num_parameters`` matches
+``Config.param_count`` exactly: both count tied embeddings once, per-head QK-norm
+gains, two RMSNorm gains per layer plus a final one, and no biases.
 """
 
 from __future__ import annotations
@@ -52,9 +51,9 @@ class MiniGPT(nn.Module):
         self.final_norm = RMSNorm(cfg.d_model, use_triton=getattr(cfg, "use_triton", False))
         self.lm_head = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
 
-        # Fused chunked-CE loss: opt-in. When on, forward computes the
-        # loss without ever materializing the [B*T, V] logits, and returns
-        # logits=None. Off by default so the eager `logits` API is preserved.
+        # Opt-in chunked-CE loss: forward computes the loss without materializing
+        # the [B*T, V] logits and returns logits=None. Off by default so the
+        # eager `logits` API is preserved.
         self.fused_loss = False
 
         self.apply(self._init_weights)
@@ -90,8 +89,8 @@ class MiniGPT(nn.Module):
             self.cfg.head_dim, t, self.cfg.rope_base, device=idx.device, dtype=self.embed.weight.dtype
         )
 
-        # Packed-conversation attention mask: two positions may attend
-        # only if they carry the same segment id.
+        # Packed-conversation mask: two positions may attend only if they share
+        # a segment id.
         seg_equal = None
         if segment_ids is not None:
             seg_equal = segment_ids[:, :, None] == segment_ids[:, None, :]
@@ -108,8 +107,7 @@ class MiniGPT(nn.Module):
                 # Positions with mask==0 are excluded from the loss.
                 tgt = tgt.masked_fill(loss_mask == 0, IGNORE_INDEX)
 
-        # Memory-efficient path: stream the vocabulary instead of materializing
-        # the full logits tensor (the pivotal batch-size unlock).
+        # Stream the vocabulary instead of materializing the full logits tensor.
         if self.fused_loss and tgt is not None:
             from mini_gpt.kernels import chunked_cross_entropy
 

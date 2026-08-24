@@ -1,14 +1,14 @@
 """Supervised fine-tuning entry point.
 
-Loads a pretrained (base/anneal) checkpoint, continues training on chat-formatted
-conversations with assistant-only masked loss and packed, attention-isolated
-conversations, and writes an instruct checkpoint.
+Loads a pretrained (base or annealed) checkpoint, continues training on
+chat-formatted conversations with an assistant-only masked loss and packed,
+attention-isolated conversations, and writes an instruct checkpoint.
 
     python scripts/sft.py --tier mini --tokenizer out/tok.json \
         --init out/mini/ckpt_final.pt --data data/chat.jsonl --out out/mini_sft --steps 2000
 
-The chat data is a JSONL file of ``{"messages": [{"role","content"}, ...]}``; with
-``--data synthetic`` it uses the offline arithmetic conversations instead.
+Chat data is a JSONL file of ``{"messages": [{"role","content"}, ...]}``;
+``--data synthetic`` uses the offline arithmetic conversations instead.
 """
 
 from __future__ import annotations
@@ -89,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
     reply = generate_reply(model, tok, [{"role": "user", "content": "What is 2 + 3?"}], max_new_tokens=16)
     print(f"sample reply: {reply!r}")
 
-    # Reuse the Trainer's checkpoint format so the SFT model loads like any other.
+    # Reuse the Trainer checkpoint format so the SFT model loads like any other.
     opt = build_optimizers(raw_model, cfg)
     sched = build_scheduler(opt, cfg)
     trainer = Trainer(model, opt, sched, lambda: None, cfg, device=args.device, raw_model=raw_model)

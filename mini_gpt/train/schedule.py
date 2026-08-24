@@ -1,11 +1,10 @@
 """Learning-rate schedule.
 
-Linear warmup to the peak, then cosine decay to a floor fraction of the peak.
-Implemented as one multiplier applied to every param group's base LR, so
-distinct per-group peak LRs (AdamW vs. Muon) keep their ratio through the whole
-schedule. This is a small standalone scheduler rather than ``LambdaLR`` so it
-also drives the ``CombinedOptimizer`` wrapper (which is not a torch
-``Optimizer`` instance).
+Linear warmup to the peak, then cosine decay to a floor fraction of it. One
+multiplier is applied to every param group's base LR, so distinct per-group peak
+LRs (AdamW vs. Muon) keep their ratio across the whole schedule. Standalone
+rather than ``LambdaLR`` so it also drives ``CombinedOptimizer``, which is not a
+torch ``Optimizer`` instance.
 """
 
 from __future__ import annotations

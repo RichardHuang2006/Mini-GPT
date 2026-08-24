@@ -1,18 +1,17 @@
 """Fused SwiGLU gating.
 
 Fuses the elementwise gate ``h = SiLU(a) * b`` where ``a = x·Wg`` and ``b = x·Wu``,
-so the two hidden intermediates are never both held expanded in HBM -- only the
-single fused product ``h`` is. The surrounding ``gate``/``up``/``down`` matmuls
-stay as cuBLAS GEMMs (fusing a GEMM is out of scope).
+so only the fused product ``h`` is held expanded in HBM rather than both hidden
+intermediates. The surrounding ``gate``/``up``/``down`` matmuls stay as cuBLAS
+GEMMs; fusing a GEMM is out of scope.
 
 Backward (``s = sigmoid(a)``, ``silu = a*s``)::
 
     da = dh * b * (s * (1 + a * (1 - s)))
     db = dh * silu
 
-The forward saves only ``a`` and ``b`` (same size as the output), so the memory
-footprint is the eager one minus the second materialized intermediate -- which is
-what ``test_swiglu`` checks via a peak-memory delta.
+The forward saves only ``a`` and ``b`` (each the size of the output), so the
+footprint is the eager one minus the second materialized intermediate.
 """
 
 from __future__ import annotations

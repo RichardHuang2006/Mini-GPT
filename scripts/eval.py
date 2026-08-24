@@ -2,9 +2,9 @@
 
 Scores one or more checkpoints on every metric and writes ``results.json`` plus a
 Markdown table. Perplexity is measured on the held-out ``val`` split of the packed
-data (a shard the model never trained on); the multiple-choice and HumanEval task
-sets are read from JSONL if given, else tiny built-in samples keep the command
-runnable end-to-end.
+data, a shard the model never trained on. The multiple-choice and HumanEval task
+sets are read from JSONL when given; otherwise tiny built-in samples keep the
+command runnable end to end.
 
     python scripts/eval.py --tier mini --tokenizer out/tok.json --data out/shards \
         --ckpt base:out/mini/ckpt_final.pt --ckpt sft:out/mini_sft/ckpt_sft.pt \
@@ -28,8 +28,8 @@ from mini_gpt.eval import harness  # noqa: E402
 from mini_gpt.model.transformer import MiniGPT  # noqa: E402
 from mini_gpt.tokenizer import MiniTokenizer  # noqa: E402
 
-# Tiny built-in samples so the harness is complete without external downloads.
-# These carry no signal; they exist so every metric is scored end-to-end.
+# Built-in samples so the harness runs without external downloads. They carry no
+# signal; they exist so every metric is scored end to end.
 _SAMPLE_MC = [
     {"prompt": "The sky is", "choices": [" blue", " loud"], "answer": 0},
     {"prompt": "Two plus two equals", "choices": [" four", " purple"], "answer": 0},

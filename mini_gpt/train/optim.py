@@ -2,16 +2,16 @@
 
 Parameters are partitioned by tensor shape into two groups:
 
-* ``hidden`` -- the 2D hidden matrices (attention and MLP projections). Weight
-  decay applies here, and this group is what moves to the Muon optimizer.
-* ``misc``   -- embeddings, RMSNorm gains, and any 1D parameter. No weight
-  decay; stays on AdamW forever.
+* ``hidden`` -- 2D hidden matrices (attention and MLP projections). Weight decay
+  applies here, and this group is what moves to Muon.
+* ``misc``   -- embeddings, RMSNorm gains, and any 1D parameter. No weight decay;
+  always on AdamW.
 
-The tied embedding / output weight is a single parameter (counted once) and
-lands in ``misc``.
+The tied embedding / output weight is one parameter, counted once, and lands in
+``misc``.
 
 Muon conditions the momentum update for matrix-shaped weights by orthogonalizing
-it with a fixed number of Newton-Schulz iterations (a few matmuls, no SVD), then
+it with a fixed number of Newton-Schulz iterations (matmuls only, no SVD), then
 applies it scaled by a shape-dependent factor.
 """
 
@@ -76,9 +76,9 @@ def build_optimizer(model: nn.Module, cfg) -> torch.optim.Optimizer:
 def zeropower_via_newtonschulz5(grad: torch.Tensor, steps: int = 5, eps: float = 1e-7) -> torch.Tensor:
     """Orthogonalize a 2D matrix via a quintic Newton-Schulz iteration.
 
-    Pushes the singular values of ``grad`` toward 1 using only matmuls (no SVD).
-    The quintic coefficients are Keller Jordan's tuned constants; five steps
-    bring a well-conditioned matrix's singular values into roughly [0.7, 1.13].
+    Pushes the singular values of ``grad`` toward 1 using matmuls only. The
+    quintic coefficients are Keller Jordan's tuned constants; five steps bring a
+    well-conditioned matrix's singular values into roughly [0.7, 1.13].
     """
     assert grad.ndim == 2, "Newton-Schulz expects a 2D matrix"
     a, b, c = 3.4445, -4.7750, 2.0315
@@ -136,7 +136,7 @@ class Muon(torch.optim.Optimizer):
 
                 if update.ndim == 2:
                     ortho = zeropower_via_newtonschulz5(update, steps=ns_steps).type_as(p)
-                    # Shape-scaled step so the update RMS is comparable across
+                    # Shape-scaled step: keeps the update RMS comparable across
                     # matrix aspect ratios.
                     scale = max(1.0, p.size(0) / p.size(1)) ** 0.5
                     if wd:
@@ -157,9 +157,9 @@ class Muon(torch.optim.Optimizer):
 class CombinedOptimizer:
     """Drives several optimizers as one, exposing the API the trainer needs.
 
-    ``param_groups`` is the concatenation of the underlying optimizers' groups
-    (the real dict objects), so a scheduler mutating ``group['lr']`` reaches the
-    actual optimizers.
+    ``param_groups`` concatenates the underlying optimizers' group dicts by
+    reference, so a scheduler mutating ``group['lr']`` reaches the real
+    optimizers.
     """
 
     def __init__(self, optimizers: list[torch.optim.Optimizer]):

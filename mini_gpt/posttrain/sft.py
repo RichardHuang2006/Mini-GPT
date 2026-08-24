@@ -1,21 +1,21 @@
 """Supervised fine-tuning.
 
-Continue training on chat-formatted conversations rendered through the *same*
-``render_chat`` template used at inference, with two properties that the
-correctness gates in ``test_posttrain.py`` pin:
+Continues training on chat-formatted conversations rendered through the same
+``render_chat`` template used at inference. Two properties are pinned by
+``test_posttrain.py``:
 
-* **Assistant-only loss.** The template's loss mask is ``1`` only on
-  assistant-authored tokens, so the model is never trained to predict the user's
-  or system's text. Next-token training shifts by one: predicting token ``t`` is
-  supervised iff token ``t`` is an assistant token, i.e. ``mask[1:]``.
-* **Packed, isolated conversations.** Several short conversations are packed into
-  one fixed-length sequence to keep throughput near pretraining's, and each is
-  given a distinct ``segment_id`` so the model's attention cannot cross a
-  conversation boundary (the segment mask is applied in ``MiniGPT.forward``).
+* Assistant-only loss. The template's loss mask is ``1`` only on
+  assistant-authored tokens, so the model is never trained to predict user or
+  system text. Next-token training shifts by one: predicting token ``t`` is
+  supervised iff ``t`` is an assistant token, i.e. ``mask[1:]``.
+* Packed, isolated conversations. Several short conversations share one
+  fixed-length sequence to keep throughput near pretraining's, each with a
+  distinct ``segment_id`` so attention cannot cross a conversation boundary (the
+  segment mask is applied in ``MiniGPT.forward``).
 
-Padding at the tail of a packed sequence gets ``segment_id = PAD_SEGMENT`` and a
-zero loss mask, so it neither contributes to the loss nor is attended to by real
-tokens (it can still attend to itself, which keeps the softmax row well-defined).
+Tail padding gets ``segment_id = PAD_SEGMENT`` and a zero loss mask, so it
+neither contributes to the loss nor is attended to by real tokens; it can still
+attend to itself, keeping the softmax row well-defined.
 """
 
 from __future__ import annotations
@@ -37,8 +37,9 @@ _DTYPES = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torc
 def synthetic_sft_conversations(n: int, *, seed: int = 0) -> list[list[dict]]:
     """Deterministic chat conversations for offline dev and tests.
 
-    Arithmetic Q/A in the role-tagged format, so the packing/mask/generation path
-    is exercised end to end without an instruction dataset. Some are multi-turn.
+    Arithmetic Q/A in the role-tagged format, exercising the packing, masking, and
+    generation path end to end without an instruction dataset. Some are
+    multi-turn.
     """
     import random
 
@@ -150,7 +151,7 @@ def pack_conversations(
 
     # Next-token shift. Predicting position i uses the target at i+1, supervised
     # iff that predicted token is an assistant token (mask[1:]). Segment ids align
-    # with the *input* positions (queries), so they are the left slice.
+    # with the input positions (queries), hence the left slice.
     return PackedSFT(
         input_ids=ids_t[:, :-1].contiguous(),
         targets=ids_t[:, 1:].contiguous(),
@@ -184,7 +185,7 @@ def train_sft(
     """Run SFT for ``steps`` optimizer steps over ``packed`` (cycled).
 
     Reuses the pretraining optimizer/schedule stack; one optimizer step
-    accumulates ``cfg.grad_accum`` micro-batches. Returns the per-step loss.
+    accumulates ``cfg.grad_accum`` micro-batches. Returns per-step losses.
     """
     from mini_gpt.train.optim import build_optimizers
     from mini_gpt.train.schedule import build_scheduler

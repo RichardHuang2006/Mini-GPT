@@ -1,8 +1,7 @@
-"""The eager model is the oracle.
+"""The eager model as the reference implementation.
 
 Every module is checked against a hand-written reference or a stock op, and the
-whole model must pass the overfit-one-batch gate -- the correctness milestone
-before any real training.
+whole model must drive one fixed batch to near-zero loss.
 """
 
 from __future__ import annotations
@@ -74,7 +73,7 @@ def test_mini_mlp_hidden_is_1408():
 def _reference_attention(attn: Attention, x, cos, sin):
     """Recompute attention from the module's weights, independently of SDPA.
 
-    Returns (output, pre-softmax logits) so tests can inspect logit magnitude.
+    Returns (output, pre-softmax logits) so callers can inspect logit magnitude.
     """
     b, t, _ = x.shape
     hd, nq, nkv = attn.head_dim, attn.n_q_heads, attn.n_kv_heads
@@ -199,7 +198,7 @@ def test_loss_mask_excludes_positions():
 
 
 # --------------------------------------------------------------------------
-# the overfit-one-batch gate (the correctness milestone)
+# overfit one batch
 # --------------------------------------------------------------------------
 
 def test_overfit_one_batch():
@@ -219,6 +218,6 @@ def test_overfit_one_batch():
         opt.step()
         loss_val = loss.item()
 
-    # A correct model drives one fixed batch to near-zero loss. If this fails,
-    # the model or the backward pass is wrong.
+    # A correct model drives one fixed batch to near-zero loss; a failure here
+    # points at the model or the backward pass.
     assert loss_val < 0.1, f"failed to overfit: final loss {loss_val:.3f}"

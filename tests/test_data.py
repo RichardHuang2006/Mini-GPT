@@ -1,7 +1,7 @@
 """Data pipeline tests: download idempotency, uint16 packing, and the sampler.
 
 Everything runs offline: the download source is the deterministic synthetic
-generator, and a small tokenizer is trained on that same text.
+generator, and a small tokenizer is trained on the same text.
 """
 
 from __future__ import annotations

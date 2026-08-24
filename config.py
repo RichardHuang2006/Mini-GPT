@@ -1,14 +1,12 @@
 """Mini-GPT configuration.
 
-One `Config` dataclass carries every architectural and training knob; three
-presets -- ``nano``, ``mini``, ``small`` -- instantiate it. Nothing downstream
-hardcodes a dimension: the model, optimizer, data sampler, and kernels all read
-their shapes from here.
+One ``Config`` dataclass carries every architectural and training knob, with three
+presets: ``nano``, ``mini``, ``small``. Nothing downstream hardcodes a dimension;
+the model, optimizer, data sampler, and kernels all read their shapes from here.
 
-The parameter count is computed from the fields exactly the way the eager model
-builds the weights -- tied embeddings, per-head QK-norm gains, two RMSNorm gains
-per layer plus a final one, and no biases anywhere -- so the count this file
-reports is the count the model will actually have.
+``param_count`` counts the fields exactly as the eager model builds the weights --
+tied embeddings, per-head QK-norm gains, two RMSNorm gains per layer plus a final
+one, no biases -- so the reported count is the count the model will have.
 """
 
 from __future__ import annotations
@@ -21,7 +19,7 @@ def swiglu_hidden(d_model: int, multiple: int = 128) -> int:
     """SwiGLU hidden width ~= 8/3 * d_model, rounded to a multiple of 128.
 
     The 8/3 factor keeps the gated MLP's parameter count comparable to a plain
-    4*d_model GELU MLP.
+    4*d_model GELU MLP; the rounding keeps the GEMM shapes tile-friendly.
     """
     target = (8 * d_model) / 3
     return int(round(target / multiple)) * multiple
@@ -147,8 +145,8 @@ class Config:
 
 
 # ---------------------------------------------------------------------------
-# Tier presets. `mini` is the headline overnight default; `nano` is the
-# sub-hour CI tier; `small` is a documented stretch target.
+# Tier presets: `nano` is the sub-hour CI tier, `mini` the overnight default,
+# `small` a larger configuration.
 # ---------------------------------------------------------------------------
 
 TIERS: dict[str, Config] = {

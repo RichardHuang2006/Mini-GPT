@@ -1,9 +1,8 @@
 """Training loop: micro-batching, accumulation, autocast.
 
-The optimizer step operates on a global batch reached by accumulating gradients
-over ``grad_accum`` micro-batches, so the global batch is independent of the
-micro-batch size that memory forces on us. bf16 autocast is used on CUDA; CPU
-runs in float32 (deterministic, for tests).
+Each optimizer step accumulates gradients over ``grad_accum`` micro-batches, so
+the global batch is independent of the memory-bound micro-batch size. bf16
+autocast on CUDA; CPU runs in float32, which is deterministic for tests.
 """
 
 from __future__ import annotations
@@ -26,7 +25,7 @@ class DataStream:
     """Adapts a ``ShardSampler`` into ``(inputs, targets)`` torch batches.
 
     A drawn window ``[B, context+1]`` becomes ``x = w[:, :-1]``, ``y = w[:, 1:]``.
-    Holds the sampler so its position is part of the checkpoint.
+    Owns the sampler so its position is part of the checkpoint.
     """
 
     def __init__(self, sampler: ShardSampler, batch_size: int, device: torch.device | str = "cpu"):
@@ -55,9 +54,9 @@ def _autocast_ctx(device: torch.device, dtype: torch.dtype):
 def maybe_compile(model: nn.Module, cfg):
     """Return ``torch.compile(model)`` when enabled, else the model unchanged.
 
-    Compilation is lazy (it happens on the first forward), so a backend failure
-    surfaces at call time; callers that must tolerate a missing compiler should
-    guard the first step.
+    Compilation is lazy (on the first forward), so a backend failure surfaces at
+    call time; callers that must tolerate a missing compiler should guard the
+    first step.
     """
     if getattr(cfg, "compile", False):
         return torch.compile(model)
@@ -78,8 +77,8 @@ class Trainer:
         raw_model: nn.Module | None = None,
     ):
         self.model = model
-        # The uncompiled module used for parameters()/state_dict() so a compiled
-        # `model` does not leak an `_orig_mod.` prefix into checkpoints.
+        # Uncompiled module for parameters()/state_dict(), so a compiled `model`
+        # does not leak an `_orig_mod.` prefix into checkpoints.
         self.raw_model = raw_model if raw_model is not None else model
         self.optimizer = optimizer
         self.scheduler = scheduler

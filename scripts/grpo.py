@@ -1,9 +1,9 @@
 """GRPO entry point.
 
 Loads an SFT (instruct) checkpoint and runs GRPO on the countdown / arithmetic
-task, logging the mean reward per step -- the curve whose *rise* is the milestone
-that proves the RL loop works. The GSM8K reward is available through the same
-interface but is honestly flat at `mini`.
+task, logging the mean reward per step; a rising curve is the signal that the RL
+loop works. The GSM8K reward is available through the same interface but stays
+flat at `mini`.
 
     python scripts/grpo.py --tier mini --tokenizer out/tok.json \
         --init out/mini_sft/ckpt_sft.pt --out out/mini_grpo --steps 500
@@ -29,7 +29,7 @@ from mini_gpt.tokenizer import MiniTokenizer  # noqa: E402
 
 
 def build_arithmetic_bank(n: int, *, max_new_tokens: int, seed: int = 0):
-    """A prompt bank of ``(messages, reward_fn)`` for simple arithmetic targets."""
+    """A prompt bank of ``(messages, reward_fn)`` pairs for arithmetic targets."""
     rng = random.Random(seed)
     bank = []
     for _ in range(n):

@@ -1,16 +1,16 @@
 """Fused RoPE forward + backward.
 
-The query/key rotation ``y = x*cos + rotate_half(x)*sin`` as a single elementwise
-kernel, with no materialized sin/cos-expanded ``[B, H, T, D]`` tensors -- ``cos``
-and ``sin`` stay ``[T, D]`` and each row reads its own position.
+The query/key rotation ``y = x*cos + rotate_half(x)*sin`` as one elementwise
+kernel with no sin/cos-expanded ``[B, H, T, D]`` tensors: ``cos`` and ``sin``
+stay ``[T, D]`` and each row reads its own position.
 
-The rotation is an orthogonal linear map per position, so its backward is the
+The rotation is an orthogonal linear map per position, so the backward is the
 same op with the sign of ``sin`` flipped::
 
     grad_x = dy*cos + rotate_half(dy)*(-sin)
 
-which lets the forward kernel serve the backward too. ``cos``/``sin`` are frozen
-precomputed constants and receive no gradient.
+so the forward kernel serves the backward too. ``cos``/``sin`` are precomputed
+constants and receive no gradient.
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from __future__ import annotations
 import torch
 
 from mini_gpt.kernels import HAS_TRITON
-from mini_gpt.model.rope import apply_rope as _apply_rope_eager  # frozen oracle
+from mini_gpt.model.rope import apply_rope as _apply_rope_eager  # eager reference
 
 if HAS_TRITON:
     import triton
@@ -78,7 +78,7 @@ if HAS_TRITON:
 def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
     """Apply RoPE to ``x`` of shape ``[B, H, T, head_dim]``.
 
-    Fused Triton kernel on CUDA, eager rotation (the frozen oracle) elsewhere.
+    Fused Triton kernel on CUDA, the eager rotation elsewhere.
     """
     if HAS_TRITON and x.is_cuda:
         return _RoPETriton.apply(x, cos, sin)

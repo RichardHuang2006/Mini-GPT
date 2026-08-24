@@ -1,8 +1,8 @@
 """SwiGLU MLP.
 
 ``down(SiLU(gate(x)) * up(x))`` with no biases. Hidden width is ~= 8/3 * d_model
-rounded to a multiple of 128 (see ``config.swiglu_hidden``), which keeps the
-gated MLP's parameter count comparable to a plain 4*d_model GELU MLP.
+rounded to a multiple of 128 (``config.swiglu_hidden``), keeping the gated MLP's
+parameter count comparable to a plain 4*d_model GELU MLP.
 """
 
 from __future__ import annotations

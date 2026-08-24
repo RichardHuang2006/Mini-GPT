@@ -1,11 +1,11 @@
 """Post-training tests: SFT masking / packing, generation, and GRPO.
 
-Correctness gates:
+Properties checked:
 
-* the SFT loss is computed on assistant tokens only (zeroing the mask drops the
-  loss to zero; it equals a hand-computed cross-entropy over assistant positions);
-* packed conversations do not attend across their boundaries (a token's logits
-  are invariant to edits in a different segment, but not once blocking is off);
+* the SFT loss is computed on assistant tokens only: it equals a hand-computed
+  cross-entropy over assistant positions, and zeroing the mask drops it to zero;
+* packed conversations do not attend across their boundaries -- a token's logits
+  are invariant to edits in another segment, but not once blocking is off;
 * generation is deterministic under a fixed seed and terminates on ``<|eos|>``.
 """
 
@@ -135,7 +135,7 @@ def test_packed_conversations_do_not_attend_across_boundaries(tokenizer):
 
 
 def test_sft_mask_loss(tokenizer):
-    # The headline gate combining the two checks above.
+    # Combines the two checks above.
     test_sft_loss_is_assistant_only(tokenizer)
     test_packed_conversations_do_not_attend_across_boundaries(tokenizer)
 
@@ -155,7 +155,7 @@ def test_sft_trains_on_synthetic(tokenizer):
 # ==========================================================================
 
 class _EosModel(nn.Module):
-    """A stub that always predicts ``eos`` -- to exercise eos-stopping."""
+    """A stub that always predicts ``eos``, to exercise eos-stopping."""
 
     def __init__(self, vocab: int, eos: int):
         super().__init__()
@@ -207,7 +207,7 @@ def test_generate_format_reply_is_wellformed(tokenizer):
 
 
 def test_generate_format(tokenizer):
-    # Headline gate: deterministic + eos-terminating.
+    # Deterministic and eos-terminating.
     test_generate_greedy_is_deterministic(tokenizer)
     test_generate_stops_on_eos(tokenizer)
 
@@ -251,8 +251,8 @@ def test_rewards():
     illegal = countdown_reward("3 * 9", numbers=[3, 5], target=27, terminated=True, n_new_tokens=3, max_new_tokens=MAX)
     assert illegal.correct == 0.0  # 9 is not an allowed operand
 
-    # GSM8K: the #### delimiter answer is extracted; near-zero at mini is a data
-    # fact, but the scorer itself is correct.
+    # GSM8K: the #### delimiter answer is extracted. Correctness is near-zero at
+    # mini, but the scorer itself is exact.
     assert extract_final_int("reasoning ... #### 42") == 42
     g = gsm8k_reward("#### 42", gold=42, terminated=True, n_new_tokens=2, max_new_tokens=MAX)
     assert g.correct == 1.0
@@ -332,9 +332,9 @@ def test_grpo_zero_variance_group_produces_no_gradient(tokenizer):
 
 
 def test_grpo_reward_rises_on_countdown_format():
-    # The RL-loop-works milestone: with a learnable shaped reward (terminate the
-    # completion), GRPO drives the mean reward up over steps. This uses the format
-    # format signal the reward shaping relies on to avoid stalling at zero.
+    # With a learnable shaped reward (terminate the completion), GRPO drives the
+    # mean reward up over steps. This exercises the format signal the reward
+    # shaping relies on to avoid stalling at zero.
     convs = synthetic_sft_conversations(200, seed=0)
     text = [m["content"] for c in convs for m in c]
     tok = MiniTokenizer.train(text, vocab_size=512, min_frequency=1)
@@ -368,7 +368,7 @@ def test_group_sampling_headline(tokenizer):
 
 
 def test_grpo_update(tokenizer):
-    # Headline gate: advantages/sign correct + zero-variance no-op.
+    # Advantage signs correct, and a zero-variance group is a no-op.
     test_group_advantages_and_zero_variance()
     test_grpo_update_moves_logprobs_in_the_right_direction(tokenizer)
     test_grpo_zero_variance_group_produces_no_gradient(tokenizer)

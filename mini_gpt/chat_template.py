@@ -2,19 +2,18 @@
 
 One deterministic function maps a list of role-tagged messages to a token
 sequence and, for SFT, a parallel loss mask that is ``1`` only on
-assistant-authored tokens. Keeping the template in a single function -- rather
-than string-formatted at each call site -- is what makes the SFT loss mask and
-the GRPO prompt formatting provably consistent: both call ``render_chat`` /
-``build_prompt`` here, so there is exactly one copy of the format.
+assistant-authored tokens. Because the template lives in one function rather than
+being string-formatted per call site, the SFT loss mask and the GRPO prompt
+format cannot drift: both go through ``render_chat`` / ``build_prompt``.
 
 Layout of one turn::
 
     <|role|>  <content tokens>  <|eos|>
 
-The whole sequence opens with ``<|bos|>``. For an assistant turn, the loss mask
-covers the content tokens and the closing ``<|eos|>`` (the tokens the model must
-learn to produce) but NOT the ``<|role|>`` header (which is always given as a
-prompt, never predicted). Every non-assistant token is masked out.
+The sequence opens with ``<|bos|>``. For an assistant turn the loss mask covers
+the content tokens and the closing ``<|eos|>`` -- what the model must learn to
+produce -- but not the ``<|role|>`` header, which is always given as a prompt.
+Every non-assistant token is masked out.
 """
 
 from __future__ import annotations
@@ -26,8 +25,8 @@ from mini_gpt.tokenizer import MiniTokenizer
 
 Role = Literal["system", "user", "assistant", "tool"]
 
-# Map a message role to the special token that opens its turn. A "tool" message
-# carries a tool result; an assistant tool call is emitted inline (see below).
+# Special token that opens each role's turn. A "tool" message carries a tool
+# result; an assistant tool call is emitted inline.
 ROLE_TOKEN: dict[str, str] = {
     "system": "<|system|>",
     "user": "<|user|>",
@@ -69,9 +68,9 @@ def render_chat(
 ) -> RenderedChat:
     """Render a conversation to token IDs plus an assistant-only loss mask.
 
-    ``add_generation_prompt=True`` appends a trailing ``<|assistant|>`` header
-    (with no content) so the model is primed to generate a reply -- used at
-    inference and for GRPO rollouts. Its header token is not part of the loss.
+    ``add_generation_prompt=True`` appends a trailing, content-free
+    ``<|assistant|>`` header so the model is primed to generate a reply, as used
+    at inference and for GRPO rollouts. That header token is not part of the loss.
     """
     msgs = _coerce(messages)
 
@@ -111,7 +110,7 @@ def render_chat(
 def build_prompt(messages: Sequence[Message | dict], tokenizer: MiniTokenizer) -> list[int]:
     """Token IDs for a generation prompt (adds the trailing assistant header).
 
-    The single entry point GRPO and eval use to format a prompt for sampling,
-    guaranteeing it matches the SFT training format.
+    The single entry point GRPO and eval use to format a sampling prompt, so it
+    matches the SFT training format.
     """
     return render_chat(messages, tokenizer, add_generation_prompt=True).ids

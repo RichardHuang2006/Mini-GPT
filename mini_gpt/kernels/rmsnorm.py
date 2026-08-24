@@ -2,9 +2,8 @@
 
 One pass computes the mean-square reduction, ``rsqrt``, scale, and gain multiply
 without round-tripping the normalized activation to HBM. The backward is a
-hand-derived analytic gradient (not autograd), which is the whole point: it is
-what the fp64 ``gradcheck`` and the eager-vs-kernel compare in ``test_rmsnorm``
-hold to account.
+hand-derived analytic gradient rather than autograd, held to account by the fp64
+``gradcheck`` and the eager-vs-kernel compare in ``test_rmsnorm``.
 
 Math (row ``x``, gain ``w``, ``r = rsqrt(mean(x^2) + eps)``)::
 
@@ -100,8 +99,8 @@ if HAS_TRITON:
             _rmsnorm_bwd_dx_kernel[(M,)](
                 x2, weight, dy2, rstd, dx, x2.stride(0), N, BLOCK=BLOCK
             )
-            # Gain gradient: reduce over rows. Cheap [N] output; done in torch
-            # (fp32) to keep the kernel scope to the memory-bound dx.
+            # Gain gradient: reduce over rows. Cheap [N] output, done in torch
+            # (fp32) to keep the kernel scoped to the memory-bound dx.
             x_hat = (x2.float() * rstd[:, None])
             dweight = (dy2.float() * x_hat).sum(dim=0).to(weight.dtype)
             return dx.reshape(ctx.shape), dweight, None
