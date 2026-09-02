@@ -1,26 +1,7 @@
-"""Configuration: one dataclass carrying every model and training knob.
+"""One Config dataclass holding every model and training knob.
 
-What this file teaches
-    How all the moving parts of the project are parameterized: the tokenizer
-    vocabulary, the transformer's shape, the attention pattern, the two
-    optimizers' learning rates, and the runtime toggles (precision, Triton,
-    torch.compile). Nothing downstream hardcodes a dimension -- the model,
-    optimizers, data sampler, and kernels all read their shapes from here.
-
-Read first
-    Nothing; this is the entry point of the reading order.
-
-Inputs and outputs
-    get_config(tier, **overrides) -> a validated Config. Three presets:
-      nano  -- CPU-friendly smoke-test tier (context 512), used by the tests
-               and the CPU training example;
-      mini  -- the single-GPU overnight default (context 1024);
-      small -- the resume-scale configuration: 32,768-token vocabulary and the
-               full 2,048-token context.
-
-``param_count`` counts fields exactly as model.py builds the weights -- tied
-embeddings counted once, per-head QK-norm gains, two RMSNorm gains per layer
-plus a final one, no biases -- and the built model is checked against it.
+Nothing downstream hardcodes a dimension. Three tiers: nano (CPU smoke,
+context 512), mini (single-GPU, 1024), small (full scale, 2048).
 """
 
 from __future__ import annotations
@@ -32,8 +13,8 @@ from typing import NamedTuple
 def swiglu_hidden(d_model: int, multiple: int = 128) -> int:
     """SwiGLU hidden width ~= 8/3 * d_model, rounded to a multiple of 128.
 
-    The 8/3 factor keeps the gated MLP's parameter count comparable to a plain
-    4*d_model GELU MLP; the rounding keeps the GEMM shapes tile-friendly.
+    8/3 matches a plain 4*d_model GELU MLP's parameter count; the rounding
+    keeps GEMM shapes tile-friendly.
     """
     target = (8 * d_model) / 3
     return int(round(target / multiple)) * multiple
@@ -131,6 +112,9 @@ class Config:
 
     # ------------------------------------------------------- parameter count
     def param_count(self) -> ParamCount:
+        """Count fields exactly as model.py builds them: tied embeddings once,
+        per-head QK-norm gains, two RMSNorm gains per layer plus a final one,
+        no biases. The tests assert the built model matches."""
         d = self.d_model
         embedding = self.vocab_size * d  # tied input/output projection
 
@@ -155,12 +139,6 @@ class Config:
         """Return a copy with fields replaced (re-validated)."""
         return replace(self, **kwargs)
 
-
-# ---------------------------------------------------------------------------
-# Tier presets: `nano` is the CPU-friendly smoke-test tier, `mini` the
-# single-GPU overnight default, and `small` the resume-scale configuration
-# with the full 2,048-token context.
-# ---------------------------------------------------------------------------
 
 TIERS: dict[str, Config] = {
     "nano": Config(

@@ -1,23 +1,6 @@
-"""Autoregressive text generation: greedy, temperature, and top-k sampling.
+"""Autoregressive generation: greedy, temperature, and top-k sampling.
 
-What this file teaches
-    The core sampling loop of a language model: run the forward pass, take the
-    logits of the last position, pick the next token (argmax or a tempered
-    sample), append it, repeat. No KV cache -- the full sequence is re-run each
-    step, so the loop stays obvious; correctness and determinism come first.
-
-Read first
-    model.py (the forward pass), tokenizer.py (encode/decode and <|eos|>).
-
-Inputs and outputs
-    generate():       idx [B, T0] token IDs -> [B, T0 + n] extended IDs
-    generate_reply(): chat messages -> the decoded assistant reply string
-    CLI: a checkpoint + tokenizer + prompt -> printed text.
-
-Representative command
-    python -m mini_gpt.generate --ckpt out/nano/ckpt_final.pt --tokenizer data/tok.json \
-        --tier nano --prompt "the quick brown" --max-new-tokens 40 \
-        --temperature 0.8 --top-k 40 --seed 0
+No KV cache -- the full sequence is re-run each step, keeping the loop obvious.
 """
 
 from __future__ import annotations
@@ -45,15 +28,12 @@ def generate(
 ) -> torch.Tensor:
     """Extend idx [B, T0] by up to max_new_tokens tokens; returns [B, T0 + n].
 
-    temperature == 0 is greedy (argmax) and exactly reproducible; > 0 samples
-    from the tempered softmax, reproducibly when `seed` is given. A row that
-    emits eos_id is frozen (padded with eos) and the loop exits early once every
-    row has finished.
+    temperature == 0 is greedy and exactly reproducible; > 0 samples from the
+    tempered softmax, reproducibly when `seed` is given. A row emitting eos_id
+    is frozen, and the loop exits once every row has finished.
 
-    `context` enforces the model's maximum context (e.g. 2048): only the last
-    `context` tokens are fed to the forward pass, so generation can continue
-    past T0 + n > context without ever exceeding the trained window. Defaults
-    to model.cfg.context when the model carries a config.
+    Only the last `context` tokens reach the forward pass, so generation can
+    run past the trained window. Defaults to model.cfg.context.
     """
     model.eval()
     device = idx.device
@@ -68,7 +48,6 @@ def generate(
     finished = torch.zeros(idx.shape[0], dtype=torch.bool, device=device)
 
     for _ in range(max_new_tokens):
-        # Context enforcement: the model only ever sees its trained window.
         idx_cond = idx if context is None or idx.shape[1] <= context else idx[:, -context:]
         logits, _ = model(idx_cond)              # [B, T, V]
         next_logits = logits[:, -1, :].float()   # [B, V]: last position only
@@ -110,12 +89,10 @@ def generate_reply(
     top_k: int | None = None,
     seed: int | None = None,
 ) -> str:
-    """Prompt the model through the chat template and decode the assistant reply.
-
-    Returns the decoded new tokens, truncated at the first <|eos|>.
-    """
-    # Imported lazily: posttrain.py (which owns the chat template) imports this
-    # module for GRPO rollouts, so a top-level import here would be circular.
+    """Prompt through the chat template; returns the decoded new tokens,
+    truncated at the first <|eos|>."""
+    # Lazy: posttrain.py imports this module for GRPO rollouts, so a top-level
+    # import would be circular.
     from mini_gpt.posttrain import build_prompt
 
     prompt = build_prompt(messages, tokenizer)
@@ -135,9 +112,7 @@ def generate_reply(
     return tokenizer.decode(new_tokens)
 
 
-# =============================================================================
-# Command-line interface
-# =============================================================================
+# --- CLI ---------------------------------------------------------------------
 
 def main(argv: list[str] | None = None) -> int:
     from mini_gpt.config import get_config

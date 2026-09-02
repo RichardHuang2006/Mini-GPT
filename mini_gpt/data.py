@@ -1,32 +1,8 @@
-"""Dataset preparation: text sources -> trained tokenizer -> packed uint16 shards.
+"""Dataset preparation: text sources -> tokenizer -> packed uint16 shards.
 
-What this file teaches
-    The full pretraining data pipeline in three stages:
-      1. fetch  -- write raw text documents into .jsonl "parts" (from NVIDIA
-                   ClimbMix, or a deterministic synthetic source for offline work);
-      2. pack   -- BPE-encode the documents into flat binary shards of uint16
-                   token IDs, with an <|eos|> between documents and a manifest
-                   recording the train/val split and tokenizer fingerprint;
-      3. sample -- draw random fixed-length windows from the memory-mapped
-                   shards, reproducibly from a seed, for next-token training.
-
-Read first
-    tokenizer.py (the 32K BPE these shards are encoded with).
-
-Inputs and outputs
-    prepare (CLI): a --source (synthetic | hf-raw | hf-tokens) ->
-        a tokenizer JSON (--tokenizer) and a shard directory (--data) holding
-        shard_*.bin files plus manifest.json.
-    ShardSampler: a shard directory -> [batch, context+1] int64 windows.
-
-Representative commands
-    # offline synthetic corpus (small, no network):
-    python -m mini_gpt.data --source synthetic --parts 2 --docs-per-part 2000 \
-        --tokenizer data/tok.json --data data/packed --shard-tokens 100000
-
-    # ClimbMix-derived corpus (DOWNLOADS a large dataset from HuggingFace):
-    python -m mini_gpt.data --source hf-raw --parts 64 --docs-per-part 20000 \
-        --tokenizer data/tok.json --data data/packed --shard-tokens 50000000
+Three stages, in file order: fetch text into .jsonl parts, pack it into flat
+uint16 shards plus a manifest, then sample fixed-length windows for training.
+Shards are encoded with tokenizer.py's 32K BPE.
 """
 
 from __future__ import annotations
@@ -50,20 +26,13 @@ SHARD_TEMPLATE = "shard_{:05d}.bin"
 MANIFEST_NAME = "manifest.json"
 
 
-# =============================================================================
-# 1. Text sources
-#
-# Every source is just an iterator of document strings. ClimbMix is NVIDIA's
-# 400B-token pretraining mixture; its official release ships GPT-2 token IDs,
-# so there are two HuggingFace paths plus an offline synthetic one.
-# =============================================================================
+# --- 1. Text sources ---------------------------------------------------------
+# Each source is an iterator of document strings. ClimbMix's official release
+# ships GPT-2 token IDs, hence two HuggingFace paths plus an offline one.
 
 def synthetic_docs(n: int, *, seed: int = 0) -> Iterator[str]:
-    """Deterministic pseudo-text for offline development and tests.
-
-    Not real language, but a recombined controlled vocabulary -- varied enough
-    to give the BPE trainer real merges and the sampler real windows.
-    """
+    """Deterministic pseudo-text for offline development and tests: not real
+    language, but varied enough to give the BPE trainer real merges."""
     rng = random.Random(seed)
     words = (
         "the quick brown fox jumps over a lazy dog while tensor gradients flow "
@@ -87,11 +56,9 @@ def iter_climbmix_raw(streaming: bool = True) -> Iterator[str]:  # pragma: no co
 
 
 def iter_climbmix_tokens(streaming: bool = True) -> Iterator[str]:  # pragma: no cover - network
-    """Stream NVIDIA's official token-ID release (nvidia/Nemotron-ClimbMix) and
-    detokenize with GPT-2, since training a new 32K BPE needs raw text.
-
-    Requires the optional `tiktoken` package for the GPT-2 detokenizer.
-    """
+    """Stream NVIDIA's token-ID release (nvidia/Nemotron-ClimbMix), GPT-2
+    detokenized because training a new 32K BPE needs raw text. Needs the
+    optional `tiktoken` package."""
     import tiktoken
     from datasets import load_dataset
 
@@ -118,12 +85,7 @@ def resolve_source(source: str | Callable[[], Iterable[str]] | Iterable[str]) ->
     return source
 
 
-# =============================================================================
-# 2. Text parts on disk (fetch stage)
-#
-# Documents are grouped into .jsonl part files so an interrupted download can
-# resume: writing is atomic per part and an existing part index is skipped.
-# =============================================================================
+# --- 2. Text parts on disk (fetch) -------------------------------------------
 
 def part_path(out_dir: str | Path, index: int) -> Path:
     return Path(out_dir) / PART_TEMPLATE.format(index)
@@ -152,8 +114,8 @@ def write_parts(
 ) -> list[Path]:
     """Group `texts` into `parts` jsonl files of `docs_per_part` docs each.
 
-    Idempotent: part indices that already exist are kept (unless `overwrite`),
-    so a re-run continues where a previous one stopped instead of re-fetching.
+    Idempotent: existing part indices are kept unless `overwrite`, so an
+    interrupted download continues instead of re-fetching.
     """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -175,8 +137,8 @@ def write_parts(
                 break
         if not docs:
             break  # source exhausted
-        # Write atomically via a temp file so an interrupted run never leaves a
-        # half-written part that the idempotency check would take for complete.
+        # Atomic via temp file: an interrupted run must not leave a half-written
+        # part that the idempotency check would take for complete.
         tmp = path.with_suffix(path.suffix + ".tmp")
         with tmp.open("w", encoding="utf-8") as f:
             for doc in docs:
@@ -188,11 +150,9 @@ def write_parts(
 
 
 def read_parts(parts_dir: str | Path) -> Iterator[str]:
-    """Yield every document across all parts, in part order.
-
-    Re-reads from disk per call, so the corpus can be streamed twice -- once to
-    train the tokenizer, once to pack -- without holding it in RAM.
-    """
+    """Yield every document across all parts, in part order. Re-reads from disk
+    per call, so the corpus streams twice -- once to train the tokenizer, once
+    to pack -- without ever sitting in RAM."""
     for index in existing_part_indices(parts_dir):
         with part_path(parts_dir, index).open("r", encoding="utf-8") as f:
             for line in f:
@@ -201,13 +161,9 @@ def read_parts(parts_dir: str | Path) -> Iterator[str]:
                     yield json.loads(line)["text"]
 
 
-# =============================================================================
-# 3. Packed uint16 shards + manifest (pack stage)
-#
-# The corpus becomes one long token stream, cut into flat .bin shards. The
-# manifest records which shards are train vs val and the fingerprint of the
-# tokenizer that produced them, so a stale tokenizer/shard pairing fails loudly.
-# =============================================================================
+# --- 3. Packed uint16 shards + manifest (pack) -------------------------------
+# One long token stream cut into flat .bin shards. The manifest records the
+# train/val split and the tokenizer fingerprint, so a stale pairing fails loud.
 
 @dataclass
 class ShardInfo:
@@ -247,11 +203,10 @@ def pack_corpus(
     val_shards: int = 1,
     add_eos: bool = True,
 ) -> Manifest:
-    """Encode `docs` and write fixed-size uint16 shards plus a manifest.
+    """Encode `docs` into fixed-size uint16 shards plus a manifest.
 
-    An <|eos|> is inserted between documents so the model sees document
-    boundaries. The last `val_shards` shards are tagged as the held-out
-    validation split (always leaving at least one train shard).
+    An <|eos|> between documents marks the boundaries; the last `val_shards`
+    shards become the held-out split, always leaving one train shard.
     """
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -264,7 +219,6 @@ def pack_corpus(
     def flush(chunk: list[int]) -> None:
         nonlocal shard_index
         arr = np.asarray(chunk, dtype=DTYPE)
-        # uint16 must be lossless for these IDs (vocab < 65,536).
         assert np.array_equal(arr.astype(np.int64), np.asarray(chunk, dtype=np.int64)), (
             "token id exceeded uint16 range -- vocab must be < 65536"
         )
@@ -307,8 +261,8 @@ def load_manifest(data_dir: str | Path) -> Manifest:
 
 
 def open_shard(path: str | Path) -> np.memmap:
-    """Memory-map a shard read-only: token windows are sliced straight from the
-    OS page cache, so no shard is ever fully loaded into RAM."""
+    """Memory-map a shard read-only: windows are sliced from the OS page cache,
+    so no shard is ever fully loaded into RAM."""
     return np.memmap(path, dtype=DTYPE, mode="r")
 
 
@@ -325,21 +279,18 @@ def verify_against_tokenizer(data_dir: str | Path, tokenizer: MiniTokenizer) -> 
     return load_manifest(data_dir).tokenizer_fingerprint == tokenizer.fingerprint()
 
 
-# =============================================================================
-# 4. Windowed sampling (sample stage)
-#
-# Training draws random windows of `context + 1` tokens: the first `context`
-# are the inputs and the last `context` (shifted by one) are the targets.
-# =============================================================================
+# --- 4. Windowed sampling (sample) -------------------------------------------
 
 class ShardSampler:
-    """Seeded, resumable sampler of fixed-length windows over one split.
+    """Seeded, restartable sampler of `context + 1`-token windows over one
+    split: the first `context` are inputs, the same window shifted by one is
+    targets.
 
-    A window lies entirely within one shard: the shard is chosen with
-    probability proportional to its number of valid start positions, then a
-    uniform start inside it. Both draws come from a single seeded numpy
-    generator, so the window stream is a pure function of (seed, draws so far)
-    -- which is what makes checkpoint resume reproduce the exact data order.
+    A window lies entirely within one shard, chosen with probability
+    proportional to its valid start positions, then a uniform start inside it.
+    Both draws come from one seeded generator, so the stream is a pure function
+    of (seed, draws so far) -- which is what reproduces the data order exactly
+    when a run picks up from a checkpoint.
     """
 
     def __init__(
@@ -389,9 +340,8 @@ class ShardSampler:
         """A `[batch_size, context + 1]` int64 array of stacked windows."""
         return np.stack([self.next_window() for _ in range(batch_size)])
 
-    # ------------------------------------------------------------ persistence
-    # The sampler state rides along in training checkpoints so a resumed run
-    # continues the window stream instead of replaying or skipping data.
+    # --- persistence: rides along in checkpoints so a restarted run carries
+    # on through the window stream instead of replaying or skipping data.
     def state_dict(self) -> dict[str, Any]:
         return {
             "seed": self.seed,
@@ -408,9 +358,7 @@ class ShardSampler:
         self.rng.bit_generator.state = state["rng_state"]
 
 
-# =============================================================================
-# 5. Command-line interface: fetch -> train tokenizer -> pack
-# =============================================================================
+# --- 5. CLI: fetch -> train tokenizer -> pack --------------------------------
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
@@ -435,7 +383,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--overwrite", action="store_true", help="re-fetch parts even if present")
     args = ap.parse_args(argv)
 
-    # 1. fetch text parts (idempotent: existing parts are kept unless --overwrite)
+    # 1. fetch text parts
     written = write_parts(
         args.parts_dir,
         resolve_source(args.source),
@@ -452,7 +400,7 @@ def main(argv: list[str] | None = None) -> int:
     tok.save(args.tokenizer)
     print(f"tokenizer: {tok.vocab_size} tokens -> {args.tokenizer}")
 
-    # 3. pack to uint16 shards + manifest (with a held-out val split)
+    # 3. pack to uint16 shards + manifest
     manifest = pack_corpus(
         read_parts(args.parts_dir),
         tok,

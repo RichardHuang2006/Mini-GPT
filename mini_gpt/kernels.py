@@ -1,30 +1,11 @@
 """Fused Triton kernels with eager PyTorch references and automatic fallback.
 
-What this file teaches
-    How custom GPU kernels slot into a PyTorch model: each operation has
-      1. a plain PyTorch *reference* implementation (the ground truth),
-      2. a Triton kernel wrapped in a torch.autograd.Function with a
-         hand-derived backward,
-      3. a public dispatcher that uses the kernel on CUDA and the reference
-         everywhere else, so `use_triton=True` is safe on a CPU-only box.
-    test_minigpt.py compares each kernel's forward value and backward gradient
-    against its reference on CUDA (a "differential test").
-
-Read first
-    model.py (the eager modules these kernels accelerate).
-
-Operations and shapes
-    rmsnorm(x [.., N], weight [N])            -> [.., N]
-    apply_rope(x [B, H, T, d], cos/sin [T, d])-> [B, H, T, d]
-    swiglu(a [..], b [..])                    -> [..]   (elementwise SiLU(a)*b)
-    chunked_cross_entropy(hidden [N, D], weight [V, D], targets [N]) -> scalar
-
-Representative command (differential tests; the CUDA ones skip without a GPU):
-    python -m pytest -k kernel -q
-
-No speed or memory numbers are claimed here; the one memory property that is
-guaranteed by construction -- chunked cross-entropy never materializes the full
-[N, V] logits tensor -- is asserted directly by a peak-memory test on CUDA.
+These accelerate the eager modules in model.py. Every operation comes in three
+layers:
+  1. an eager PyTorch reference -- the ground truth the tests compare against;
+  2. a Triton kernel in a torch.autograd.Function with a hand-derived backward;
+  3. a dispatcher picking the kernel on CUDA and the reference everywhere else,
+     so use_triton=True is safe on a CPU-only box.
 """
 
 from __future__ import annotations
@@ -55,16 +36,11 @@ __all__ = [
 ]
 
 
-# =============================================================================
-# 1. RMSNorm: y = x * rsqrt(mean(x^2) + eps) * weight, over the last dim.
-# =============================================================================
+# --- 1. RMSNorm: y = x * rsqrt(mean(x^2) + eps) * weight ---------------------
 
 def rmsnorm_reference(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    """Eager reference. x: [.., N], weight: [N] -> [.., N].
-
-    Reductions run in float32 regardless of the activation dtype (matching the
-    kernel), so bf16 inputs agree with the fused path to tolerance.
-    """
+    """Eager reference. x: [.., N], weight: [N] -> [.., N]. Reductions run in
+    float32 like the kernel, so bf16 inputs agree with it to tolerance."""
     dtype = x.dtype
     xf = x.float()
     xf = xf * torch.rsqrt(xf.pow(2).mean(dim=-1, keepdim=True) + eps)
@@ -75,8 +51,7 @@ if HAS_TRITON:
 
     @triton.jit
     def _rmsnorm_fwd_kernel(X, W, Y, Rstd, stride, N, eps, BLOCK: tl.constexpr):
-        # One program per row: compute the mean-square reduction, rsqrt, scale,
-        # and gain multiply in a single pass over the row.
+        # One program per row: reduction, rsqrt, scale and gain in one pass.
         row = tl.program_id(0)
         cols = tl.arange(0, BLOCK)
         mask = cols < N
@@ -133,8 +108,8 @@ if HAS_TRITON:
             dx = torch.empty_like(x2)
             BLOCK = triton.next_power_of_2(N)
             _rmsnorm_bwd_dx_kernel[(M,)](x2, weight, dy2, rstd, dx, x2.stride(0), N, BLOCK=BLOCK)
-            # Gain gradient: a cheap [N]-sized reduction over rows, done in
-            # torch fp32 to keep the kernel scoped to the memory-bound dx.
+            # Gain gradient: a cheap [N] reduction, left in torch fp32 so the
+            # kernel stays scoped to the memory-bound dx.
             x_hat = x2.float() * rstd[:, None]
             dweight = (dy2.float() * x_hat).sum(dim=0).to(weight.dtype)
             return dx.reshape(ctx.shape), dweight, None
@@ -148,14 +123,9 @@ def rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> torch.T
     return rmsnorm_reference(x, weight, eps)
 
 
-# =============================================================================
-# 2. RoPE: y = x * cos + rotate_half(x) * sin, per position.
-#
-# The rotation is an orthogonal linear map per position, so the backward is the
-# same op with the sign of sin flipped: grad_x = dy*cos + rotate_half(dy)*(-sin).
-# One kernel therefore serves both directions. cos/sin are precomputed
-# constants and receive no gradient.
-# =============================================================================
+# --- 2. RoPE: y = x * cos + rotate_half(x) * sin, per position ---------------
+# The rotation is orthogonal, so the backward is the same op with sin negated
+# and one kernel serves both directions. cos/sin are constants: no gradient.
 
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
     x1, x2 = x.chunk(2, dim=-1)
@@ -171,8 +141,7 @@ if HAS_TRITON:
 
     @triton.jit
     def _rope_kernel(X, COS, SIN, O, T, D, HALF, BLOCK: tl.constexpr):
-        # One program per (B*H*T) row; each row rotates its d-vector in place.
-        # cos/sin stay [T, d] -- no [B, H, T, d] expanded copies are built.
+        # One program per (B*H*T) row. cos/sin stay [T, d]: no expanded copies.
         row = tl.program_id(0)
         pos = row % T  # position index into cos/sin (contiguous [.., T, D] layout)
 
@@ -183,8 +152,8 @@ if HAS_TRITON:
         cos = tl.load(COS + pos * D + cols, mask=mask, other=0.0).to(tl.float32)
         sin = tl.load(SIN + pos * D + cols, mask=mask, other=0.0).to(tl.float32)
 
-        # rotate_half via a shifted load: col c reads its partner channel and
-        # negates it when c is in the first half.
+        # rotate_half via a shifted load: each column reads its partner channel,
+        # negated in the first half.
         shifted = tl.where(cols < HALF, cols + HALF, cols - HALF)
         x_rot = tl.load(X + row * D + shifted, mask=mask, other=0.0).to(tl.float32)
         sign = tl.where(cols < HALF, -1.0, 1.0)
@@ -221,15 +190,10 @@ def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.T
     return rope_reference(x, cos, sin)
 
 
-# =============================================================================
-# 3. SwiGLU gating: h = SiLU(a) * b, elementwise.
-#
-# Fusing the gate means only the product h is written back to memory, not the
-# SiLU(a) intermediate. The surrounding gate/up/down matmuls stay cuBLAS GEMMs.
-# Backward (s = sigmoid(a)):
-#   da = dh * b * (s * (1 + a * (1 - s)))       (the SiLU derivative)
-#   db = dh * (a * s)                            (= dh * SiLU(a))
-# =============================================================================
+# --- 3. SwiGLU gating: h = SiLU(a) * b, elementwise --------------------------
+# Fusing writes back only h, never the SiLU(a) intermediate; the surrounding
+# gate/up/down matmuls stay cuBLAS GEMMs. Backward, with s = sigmoid(a):
+#   da = dh * b * (s * (1 + a * (1 - s)))   db = dh * (a * s)
 
 def swiglu_reference(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """Eager reference: SiLU(a) * b, any matching shapes."""
@@ -289,23 +253,12 @@ def swiglu(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     return swiglu_reference(a, b)
 
 
-# =============================================================================
-# 4. Chunked cross-entropy.
-#
-# A naive F.cross_entropy over next-token logits first materializes the full
-# [B*T, V] logits tensor. With V = 32,768 that tensor (plus its fp32 softmax
-# upcast and gradient) dominates peak memory. Here the vocabulary is processed
-# in chunks with an online softmax -- a running max `m` and running
-# sum-of-exponentials `s` are updated chunk by chunk, exactly like FlashAttention
-# handles its softmax -- so peak memory is O(B*T*chunk) instead of O(B*T*V).
-#
-# The math is exact cross-entropy: loss and gradients match F.cross_entropy to
-# floating-point tolerance for ANY chunk size (asserted in test_minigpt.py).
-#
-# This is a pure-PyTorch autograd.Function rather than a hand-written Triton
-# kernel: the per-chunk work is cuBLAS GEMMs plus reductions, so the win here
-# is memory, not a faster kernel. It runs identically on CPU and CUDA.
-# =============================================================================
+# --- 4. Chunked cross-entropy ------------------------------------------------
+# F.cross_entropy first materializes [B*T, V] logits, which at V = 32,768
+# dominates peak memory. Streaming the vocabulary with an online softmax (a
+# running max and sum-of-exponentials, as FlashAttention does) makes that
+# O(B*T*chunk). Pure PyTorch, not Triton: the per-chunk work is already GEMMs
+# and reductions, so the win is memory, not a faster kernel.
 
 def _chunks(total: int, chunk: int):
     for start in range(0, total, chunk):
@@ -313,8 +266,8 @@ def _chunks(total: int, chunk: int):
 
 
 def _compute_dtype(dtype: torch.dtype) -> torch.dtype:
-    # Upcast only low-precision activation dtypes for a stable softmax; keep
-    # float32/float64 as-is so an fp64 gradcheck exercises the exact path.
+    # Upcast only low precision, for a stable softmax; float32/float64 pass
+    # through so an fp64 gradcheck exercises the exact path.
     if dtype in (torch.float16, torch.bfloat16):
         return torch.float32
     return dtype
@@ -323,11 +276,9 @@ def _compute_dtype(dtype: torch.dtype) -> torch.dtype:
 class _ChunkedCrossEntropy(torch.autograd.Function):
     @staticmethod
     def forward(ctx, hidden, weight, targets, ignore_index, chunk):
-        # hidden: [N, D] activations; weight: [V, D] (the tied embedding);
-        # targets: [N] int64. Returns the mean loss over non-ignored positions.
-        # Autocast is disabled so the explicit float32 upcast is honored;
-        # otherwise autocast would re-downcast the matmuls and the fp32
-        # running-softmax buffers would collide with bf16 logits.
+        # Autocast off so the explicit float32 upcast is honored: otherwise it
+        # re-downcasts the matmuls and the fp32 softmax buffers collide with
+        # bf16 logits.
         with torch.autocast(device_type=hidden.device.type, enabled=False):
             N, _ = hidden.shape
             V = weight.shape[0]
@@ -346,8 +297,7 @@ class _ChunkedCrossEntropy(torch.autograd.Function):
                 logits_c = hf @ wf[c0:c1].T  # [N, c1-c0]: one vocab tile
                 chunk_max = logits_c.max(dim=1).values
                 new_m = torch.maximum(m, chunk_max)
-                # Online softmax: rescale the old sum to the new max, add the
-                # new chunk's exponentials.
+                # Rescale the running sum to the new max, add this chunk.
                 s = s * torch.exp(m - new_m) + torch.exp(logits_c - new_m[:, None]).sum(dim=1)
                 m = new_m
 
@@ -379,8 +329,8 @@ class _ChunkedCrossEntropy(torch.autograd.Function):
             grad_weight = torch.zeros_like(wf)
             valid_f = valid.to(cdtype)[:, None]
 
-            # dCE/dlogit = softmax(logits) - one_hot(target); recompute each
-            # vocab tile's logits from the saved lse instead of storing them.
+            # dCE/dlogit = softmax(logits) - one_hot(target), recomputing each
+            # tile's logits from the saved lse rather than storing them.
             for c0, c1 in _chunks(V, chunk):
                 logits_c = hf @ wf[c0:c1].T
                 p_c = torch.exp(logits_c - lse[:, None])  # softmax probs for this tile
@@ -405,7 +355,7 @@ def chunked_cross_entropy(
     """Mean cross-entropy of `hidden @ weight.T` against `targets`, streaming
     the vocabulary so the full [N, V] logits tensor is never materialized.
 
-    Equivalent (to floating-point tolerance) to:
+    Exact to floating-point tolerance, for any chunk size, against
         F.cross_entropy(hidden @ weight.T, targets, ignore_index=ignore_index)
 
     Args:

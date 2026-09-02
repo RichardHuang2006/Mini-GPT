@@ -1,35 +1,8 @@
 """Evaluation: held-out perplexity, ARC, MMLU, and HumanEval.
 
-What this file teaches
-    The three standard ways a small LM is scored:
-      1. perplexity -- exp(mean next-token NLL) on held-out text: the model's
-         effective branching factor, and the only metric with strong signal at
-         this scale;
-      2. multiple choice (ARC-Easy, ARC-Challenge, MMLU) -- score each choice
-         by the log-likelihood the model assigns to it given the question,
-         normalized by choice length so short answers don't win by brevity;
-      3. code generation (HumanEval) -- run the model's completion against the
-         task's unit tests in an isolated subprocess with a timeout, so a
-         generated infinite loop counts as a failure instead of hanging the
-         harness. pass@1 is the fraction of problems whose tests exit cleanly.
-
-    Implemented support vs. executed runs: this file implements the evaluators
-    and dataset loaders. It records numbers only in the results.json/results.md
-    that a run you launch writes -- no scores are baked in anywhere.
-
-Read first
-    model.py (the forward pass), generate.py (sampling for HumanEval),
-    data.py (the held-out val split perplexity draws from).
-
-Inputs and outputs
-    In:  checkpoints, a tokenizer, and per-metric task sets (a JSONL file,
-         'hf' to download the real dataset, or 'sample' for tiny built-ins).
-    Out: results.json and a Markdown table (results.md), one row per checkpoint.
-
-Representative command (offline; add --arc-easy hf etc. to download real sets):
-    python -m mini_gpt.evaluate --tier nano --tokenizer data/tok.json --data data/packed \
-        --ckpt base:out/nano/ckpt_final.pt --arc-easy sample --mmlu sample \
-        --humaneval sample --out out/eval
+Three ways a small LM is scored, in file order: perplexity over data.py's
+held-out val split, length-normalized multiple choice, and sandboxed execution
+of generated code. Scores exist only in the results.json a run writes.
 """
 
 from __future__ import annotations
@@ -52,8 +25,7 @@ from torch import nn
 
 from mini_gpt.tokenizer import MiniTokenizer
 
-# Chance-level baselines, reported next to every score. None means "not an
-# accuracy" (perplexity is a magnitude).
+# Reported next to every score. None means "not an accuracy".
 CHANCE_BASELINES: dict[str, float | None] = {
     "perplexity": None,
     "arc_easy": 0.25,
@@ -63,9 +35,7 @@ CHANCE_BASELINES: dict[str, float | None] = {
 }
 
 
-# =============================================================================
-# 1. Held-out perplexity
-# =============================================================================
+# --- 1. Held-out perplexity --------------------------------------------------
 
 @torch.no_grad()
 def evaluate_perplexity(
@@ -75,11 +45,9 @@ def evaluate_perplexity(
     device: torch.device | str = "cpu",
     batch_size: int = 8,
 ) -> float:
-    """Token-weighted perplexity over [N, T+1] windows (inputs + shifted targets).
-
-    perplexity = exp(total_nll / total_tokens). Windows must come from a split
-    the model never trained on; the caller draws them from a val ShardSampler.
-    """
+    """Token-weighted perplexity over [N, T+1] windows: exp(nll / tokens), the
+    model's effective branching factor. Windows must come from a split it never
+    trained on."""
     model.eval()
     w = torch.as_tensor(np.asarray(windows), dtype=torch.long)
     total_nll = 0.0
@@ -106,19 +74,16 @@ def perplexity_from_split(
     seed: int = 0,
     split: str = "val",
 ) -> float:
-    """Perplexity on n_windows sampled from the held-out split. The manifest's
-    fixed train/val shard split guarantees these tokens were never trained on."""
+    """Perplexity on n_windows from the held-out split; the manifest's fixed
+    train/val shard split is what guarantees these tokens are unseen."""
     from mini_gpt.data import ShardSampler
 
     sampler = ShardSampler(data_dir, context=context, split=split, seed=seed)
     return evaluate_perplexity(model, sampler.next_batch(n_windows), device=device)
 
 
-# =============================================================================
-# 2. Multiple choice (ARC, MMLU): length-normalized log-likelihood scoring
-#
-# Every question is a dict {"prompt": str, "choices": [str, ...], "answer": int}.
-# =============================================================================
+# --- 2. Multiple choice (ARC, MMLU) ------------------------------------------
+# A question is {"prompt": str, "choices": [str, ...], "answer": int}.
 
 @torch.no_grad()
 def _continuation_logprob(
@@ -150,7 +115,8 @@ def evaluate_multiple_choice(
     device: torch.device | str = "cpu",
 ) -> float:
     """Accuracy under length-normalized log-likelihood: each choice's summed
-    log-prob is divided by its token count, and the argmax is the prediction."""
+    log-prob divided by its token count, argmax wins. Normalizing is what stops
+    short answers from winning on brevity."""
     model.eval()
     if not questions:
         return 0.0
@@ -168,9 +134,7 @@ def evaluate_multiple_choice(
     return correct / len(questions)
 
 
-# =============================================================================
-# 3. HumanEval: sandboxed pass@1
-# =============================================================================
+# --- 3. HumanEval: sandboxed pass@1 ------------------------------------------
 
 @dataclass
 class HumanEvalProblem:
@@ -181,10 +145,8 @@ class HumanEvalProblem:
 
 def run_code_sandbox(program: str, *, timeout: float = 5.0) -> bool:
     """Run `program` in an isolated subprocess; True iff it exits cleanly.
-
-    Subprocess isolation means a crash, a failed assertion (non-zero exit), or
-    an infinite loop (timeout) is contained -- the harness itself never hangs.
-    """
+    Isolation contains a crash, a failed assertion, or an infinite loop, so the
+    harness itself never hangs."""
     fd, path = tempfile.mkstemp(suffix=".py")
     try:
         with os.fdopen(fd, "w") as f:
@@ -232,9 +194,7 @@ def evaluate_humaneval(
     return passed / len(probs)
 
 
-# =============================================================================
-# 4. Orchestration + results.json + Markdown table
-# =============================================================================
+# --- 4. Orchestration + results.json + Markdown table ------------------------
 
 def evaluate(
     model: nn.Module,
@@ -281,7 +241,7 @@ def load_results(path: str | Path) -> dict[str, dict[str, float]]:
     return json.loads(Path(path).read_text())["checkpoints"]
 
 
-# Display order, label, and whether lower is better.
+# Display order, label, lower-is-better.
 _METRICS: list[tuple[str, str, bool]] = [
     ("perplexity", "Perplexity", True),
     ("arc_easy", "ARC-Easy", False),
@@ -290,7 +250,7 @@ _METRICS: list[tuple[str, str, bool]] = [
     ("humaneval", "HumanEval", False),
 ]
 
-# base -> SFT -> GRPO is the training order; unknown names sort after, stably.
+# The training order; unknown names sort after, stably.
 _ROW_ORDER = {"base": 0, "sft": 1, "grpo": 2}
 
 
@@ -325,13 +285,10 @@ def format_tables(checkpoints: dict[str, dict[str, float]]) -> str:
     return "\n".join(lines) + "\n"
 
 
-# =============================================================================
-# 5. Task-set loading: JSONL fixtures, tiny built-in samples, or the real
-#    datasets from HuggingFace ('hf' -- a download).
-# =============================================================================
+# --- 5. Task sets: JSONL fixtures, built-in samples, or HuggingFace ----------
 
-# Tiny built-in samples: they carry no signal; they exist so every metric can
-# be exercised end to end with zero downloads.
+# The built-in samples carry no signal; they exist so every metric can be run
+# end to end with zero downloads.
 SAMPLE_MC = [
     {"prompt": "The sky is", "choices": [" blue", " loud"], "answer": 0},
     {"prompt": "Two plus two equals", "choices": [" four", " purple"], "answer": 0},
@@ -422,9 +379,7 @@ def _resolve_taskset(spec: str | None, metric: str, limit: int | None) -> list[d
     return _load_jsonl(spec)
 
 
-# =============================================================================
-# 6. Command-line interface
-# =============================================================================
+# --- 6. CLI ------------------------------------------------------------------
 
 def main(argv: list[str] | None = None) -> int:
     from mini_gpt.config import get_config

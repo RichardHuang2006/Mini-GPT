@@ -1,23 +1,6 @@
-"""The 32K byte-level BPE tokenizer with conversation and tool special tokens.
+"""The 32K byte-level BPE tokenizer, with conversation and tool special tokens.
 
-What this file teaches
-    How a byte-level BPE turns raw text into token IDs: every input string is
-    first mapped to bytes (so nothing is ever out-of-vocabulary), then greedily
-    merged into larger units learned from a training corpus. Special tokens for
-    conversation roles and tool use are reserved at fixed IDs before training.
-
-Read first
-    config.py (for the 32,768 vocabulary size and why it must fit in uint16).
-
-Inputs and outputs
-    train():  iterable of text strings           -> a MiniTokenizer
-    encode(): str                                -> list[int] token IDs
-    decode(): list[int]                          -> str (exact round-trip)
-    save()/load(): a single JSON file on disk.
-
-Representative command (train a tokenizer as part of data preparation):
-    python -m mini_gpt.data --source synthetic --parts 2 --docs-per-part 2000 \
-        --tokenizer data/tok.json --data data/packed --shard-tokens 100000
+The vocabulary size lives in config.py and must fit in uint16.
 """
 
 from __future__ import annotations
@@ -28,12 +11,8 @@ from typing import Iterable, Sequence
 
 from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
 
-# Special tokens occupy IDs 0..7, registered with the trainer before any merge
-# is learned so they are stable across every retrain. Reordering them would
-# silently shift the meaning of every previously-packed shard and checkpoint,
-# so the order is fixed. The conversation roles (<|system|>, <|user|>,
-# <|assistant|>) and the tool tokens (<|tool_call|>, <|tool_result|>) are what
-# posttrain.py's chat template is built from.
+# IDs 0..7, registered before any merge is learned so they survive a retrain.
+# Reordering silently changes the meaning of every packed shard and checkpoint.
 SPECIAL_TOKENS: tuple[str, ...] = (
     "<|pad|>",          # 0: padding for batched sequences
     "<|bos|>",          # 1: beginning of sequence
@@ -49,19 +28,15 @@ DEFAULT_VOCAB_SIZE = 32_768  # == Config.vocab_size; must stay < 65,536 (uint16)
 
 
 class MiniTokenizer:
-    """A byte-level BPE (HuggingFace `tokenizers` Rust backend) with stable
-    special-token IDs.
-
-    Byte-level means the base alphabet is all 256 bytes, so encode->decode is
-    an exact identity for any input text: there is no [UNK] token and no
-    out-of-vocabulary failure mode.
+    """A byte-level BPE (HuggingFace `tokenizers` backend) with stable special
+    IDs. The 256-byte alphabet makes encode->decode an exact identity: no
+    [UNK], no out-of-vocabulary failure mode.
     """
 
     def __init__(self, backend: Tokenizer):
         self._tok = backend
-        # Cache special-token IDs up front. Loading a foreign tokenizer that
-        # lacks them is a hard error rather than a silent None, because the
-        # chat template and packed data depend on these exact tokens.
+        # A foreign tokenizer missing these fails here rather than silently
+        # producing None IDs downstream.
         self.special_ids: dict[str, int] = {}
         for tok in SPECIAL_TOKENS:
             tid = self._tok.token_to_id(tok)
@@ -78,15 +53,11 @@ class MiniTokenizer:
         *,
         min_frequency: int = 2,
     ) -> "MiniTokenizer":
-        """Train a byte-level BPE on an iterable of text strings.
-
-        The trainer starts from the 256-byte alphabet plus the special tokens
-        and learns `vocab_size - 256 - 8` merges by greedily joining the most
-        frequent adjacent pair.
-        """
+        """Train a byte-level BPE: start from the 256-byte alphabet plus the
+        special tokens, then learn `vocab_size - 256 - 8` merges by greedily
+        joining the most frequent adjacent pair."""
         backend = Tokenizer(models.BPE(unk_token=None))
-        # add_prefix_space=False keeps encode->decode an exact identity, and
-        # the ByteLevel alphabet makes all 256 bytes representable.
+        # add_prefix_space=False keeps encode->decode an exact identity.
         backend.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
         backend.decoder = decoders.ByteLevel()
 
@@ -131,11 +102,9 @@ class MiniTokenizer:
     def fingerprint(self) -> str:
         """A content hash (sha256 of the serialized tokenizer).
 
-        Why this exists: packed token shards are just uint16 IDs, meaningless
-        without the exact tokenizer that produced them. data.py records this
-        fingerprint in the shard manifest, so mixing a shard directory with the
-        wrong tokenizer is caught loudly instead of producing garbage training
-        text.
+        Packed shards are bare uint16 IDs, meaningless without the tokenizer
+        that produced them; data.py stores this in the manifest so a mismatched
+        pairing fails loudly instead of training on garbage.
         """
         return hashlib.sha256(self._tok.to_str().encode("utf-8")).hexdigest()
 

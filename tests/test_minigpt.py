@@ -1,18 +1,10 @@
-"""The Mini-GPT test suite: one file, ordered like the reading order.
+"""The Mini-GPT test suite: one file, ordered like the package.
 
-What this file teaches
-    What each component *guarantees*, as executable assertions: the tokenizer
-    round-trips exactly, attention is causal, the Triton kernels match their
-    eager references (forward and backward), Muon and AdamW both learn, resume
-    reproduces an uninterrupted run, GRPO pushes log-probs the right way, and
-    the evaluators score what they claim to score.
-
-Read first
-    Everything else; this file is last in the reading order.
-
-Representative commands
-    python -m pytest -q                                    # full suite
-    CUDA_VISIBLE_DEVICES="" python -m pytest -q            # CPU-only: CUDA tests skip
+Every component's guarantees as executable assertions -- exact tokenizer
+round-trips, causal attention, kernels matching their eager references forward
+and backward, both optimizers learning, a restarted run reproducing an
+uninterrupted one, GRPO pushing log-probs the right way, and the evaluators
+scoring what they claim to. CUDA-only tests skip cleanly without a GPU.
 """
 
 from __future__ import annotations
@@ -74,7 +66,7 @@ def tiny_config(**overrides) -> Config:
     return Config(**base)
 
 
-# ---------------------------------------------------------------- fixtures
+# --- fixtures ----------------------------------------------------------------
 
 @pytest.fixture(scope="session")
 def tok() -> MiniTokenizer:
@@ -93,9 +85,7 @@ def packed(tok, tmp_path_factory):
     return out
 
 
-# =============================================================================
-# Tokenizer
-# =============================================================================
+# --- Tokenizer ---------------------------------------------------------------
 
 def test_default_vocab_is_32k_and_uint16_safe():
     assert DEFAULT_VOCAB_SIZE == 32_768
@@ -157,9 +147,7 @@ def test_loading_tokenizer_without_specials_raises(tmp_path):
         MiniTokenizer.load(path)
 
 
-# =============================================================================
-# Data (packing + sampling behaviors the training pipeline relies on)
-# =============================================================================
+# --- Data (packing + sampling behaviors the training pipeline relies on) -----
 
 def test_pack_is_lossless_and_fingerprinted(tok, tmp_path):
     docs = ["alpha beta", "gamma delta epsilon"]
@@ -183,7 +171,7 @@ def test_sampler_is_seeded_and_resumable(packed):
     expected = a.next_batch(3)
     fresh = data_mod.ShardSampler(packed, context=32, seed=0)
     fresh.load_state_dict(state)
-    assert np.array_equal(fresh.next_batch(3), expected)  # snapshot resumes identically
+    assert np.array_equal(fresh.next_batch(3), expected)  # snapshot replays identically
 
 
 def test_train_and_val_splits_are_disjoint(packed):
@@ -193,9 +181,7 @@ def test_train_and_val_splits_are_disjoint(packed):
     assert train_names and val_names and not (train_names & val_names)
 
 
-# =============================================================================
-# Model
-# =============================================================================
+# --- Model -------------------------------------------------------------------
 
 def test_forward_shapes_and_finite_loss():
     cfg = tiny_config()
@@ -322,7 +308,7 @@ def test_embeddings_and_lm_head_are_tied():
 def test_param_count_formula_matches_built_model(name):
     cfg = get_config(name, use_triton=False, compile=False)
     if name == "small":
-        assert cfg.context == 2_048  # the resume-scale context
+        assert cfg.context == 2_048  # the full-scale context
     model = MiniGPT(cfg)
     assert model.num_parameters() == cfg.param_count().total
 
@@ -352,9 +338,7 @@ def test_loss_mask_excludes_positions():
     assert torch.allclose(masked_loss, -picked.mean(), atol=1e-5)
 
 
-# =============================================================================
-# Training
-# =============================================================================
+# --- Training ----------------------------------------------------------------
 
 def test_forward_backward_gradients_are_finite():
     cfg = tiny_config()
@@ -456,7 +440,7 @@ def test_train_checkpoint_and_resume_match_uninterrupted_run(packed, tmp_path):
     torch.use_deterministic_algorithms(True, warn_only=True)
     train(cfg, str(packed), str(tmp_path / "full"), steps=6, log_every=0,
           ckpt_every=0, eval_every=0)
-    # Interrupted: 3 steps, then resume from the checkpoint for 3 more.
+    # Interrupted: 3 steps, then carry on from the checkpoint for 3 more.
     train(cfg, str(packed), str(tmp_path / "half"), steps=3, log_every=0,
           ckpt_every=3, eval_every=0)
     train(cfg, str(packed), str(tmp_path / "resumed"), steps=6, log_every=0,
@@ -496,9 +480,7 @@ def test_checkpoint_saves_and_loads_all_state(tmp_path):
         assert torch.equal(a, b), n
 
 
-# =============================================================================
-# Triton kernels: eager references on CPU, differential comparisons on CUDA
-# =============================================================================
+# --- Triton kernels: eager references on CPU, differential comparisons on CUDA 
 
 @pytest.mark.parametrize("chunk", [1, 7, 64, 100_000])
 def test_chunked_ce_matches_cross_entropy_any_chunk(chunk):
@@ -641,9 +623,7 @@ def test_full_model_matches_eager_with_kernels_on_cuda():
     assert torch.allclose(outs[False][1], outs[True][1], atol=1e-4)
 
 
-# =============================================================================
-# Generation
-# =============================================================================
+# --- Generation --------------------------------------------------------------
 
 def test_generation_is_deterministic_and_seeded(tok):
     cfg = tiny_config(vocab_size=512)
@@ -698,9 +678,7 @@ def test_generation_stops_on_eos(tok):
     assert out.shape[1] == 4 and out[0, -1].item() == tok.eos_id  # stopped immediately
 
 
-# =============================================================================
-# Post-training: chat template, SFT, rewards, GRPO
-# =============================================================================
+# --- Post-training: chat template, SFT, rewards, GRPO ------------------------
 
 def test_loss_mask_covers_only_assistant_tokens(tok):
     conv = [
@@ -873,9 +851,7 @@ def test_grpo_smoke_loop_runs_and_logs_mean_reward(tok):
     assert len(rewards) == 2 and all(math.isfinite(r) for r in rewards)
 
 
-# =============================================================================
-# Evaluation
-# =============================================================================
+# --- Evaluation --------------------------------------------------------------
 
 class _PreferTokens(nn.Module):
     """A stub LM that assigns high logits to a fixed token set everywhere."""

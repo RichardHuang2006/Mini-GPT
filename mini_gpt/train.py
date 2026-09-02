@@ -1,32 +1,7 @@
-"""Pretraining: AdamW + Muon optimizers, LR schedule, training loop, checkpoints.
+"""Pretraining: AdamW + Muon, the LR schedule, the loop, and checkpoints.
 
-What this file teaches
-    Everything between "I have a model and data" and "I have a checkpoint":
-      1. deterministic seeding;
-      2. splitting parameters between two optimizers -- Muon (orthogonalized
-         momentum via Newton-Schulz) for the 2D hidden matrices and AdamW for
-         embeddings and norm gains;
-      3. linear warmup followed by cosine decay;
-      4. the loop itself: gradient accumulation, bf16 autocast, clipping,
-         optimizer step, validation loss / perplexity logging, checkpoints.
-
-Read first
-    config.py, data.py (ShardSampler), model.py (MiniGPT).
-
-Inputs and outputs
-    In:  a packed shard directory from data.py and a tier name from config.py.
-    Out: checkpoints (ckpt_<step>.pt / ckpt_final.pt) holding model weights,
-         optimizer + scheduler + sampler state, and the step counter.
-
-Representative commands
-    # CPU smoke run (small model, a few steps, no compile):
-    python -m mini_gpt.train --tier nano --data data/packed --out out/nano \
-        --steps 30 --micro-batch 4 --grad-accum 2 --device cpu --no-compile
-
-    # CUDA run with periodic held-out perplexity, then resume:
-    python -m mini_gpt.train --tier mini --data data/packed --out out/mini --eval-every 1000
-    python -m mini_gpt.train --tier mini --data data/packed --out out/mini \
-        --resume out/mini/ckpt_1000.pt
+Everything between "I have a model and data" and "I have a checkpoint", over
+data.ShardSampler windows and a model.MiniGPT.
 """
 
 from __future__ import annotations
@@ -50,14 +25,12 @@ from mini_gpt.model import MiniGPT
 _DTYPES = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}
 
 
-# =============================================================================
-# 1. Determinism
-# =============================================================================
+# --- 1. Determinism ----------------------------------------------------------
 
 def seed_everything(seed: int = 0, *, deterministic: bool = True) -> int:
     """Seed Python, NumPy, and Torch (CPU + CUDA); optionally switch Torch to
     deterministic algorithms. Reproducibility is what makes the differential
-    kernel tests and the resume test meaningful."""
+    kernel tests and the checkpoint-continuation test meaningful."""
     os.environ["PYTHONHASHSEED"] = str(seed)
     random.seed(seed)
     np.random.seed(seed)
@@ -69,26 +42,22 @@ def seed_everything(seed: int = 0, *, deterministic: bool = True) -> int:
         os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
-        # warn_only: a few ops lack a deterministic implementation; warn
-        # rather than crash the run.
+        # warn_only: a few ops have no deterministic implementation, and a
+        # warning beats crashing the run.
         torch.use_deterministic_algorithms(True, warn_only=True)
     return seed
 
 
-# =============================================================================
-# 2. Parameter grouping and the two optimizers
-#
-# Parameters are partitioned by shape:
-#   "hidden" -- 2D matrices (attention and MLP projections). Weight decay
-#               applies here, and this group is what Muon updates.
-#   "misc"   -- embeddings, RMSNorm gains, any 1D parameter. No weight decay;
-#               always AdamW. The tied embedding/output weight is one
-#               parameter, counted once, and lands here.
-# =============================================================================
+# --- 2. Parameter grouping and the two optimizers ----------------------------
 
 def classify_parameters(model: nn.Module) -> dict[str, list[nn.Parameter]]:
-    """Split parameters into 'hidden' and 'misc', deduplicated by identity so
-    the tied embedding weight is assigned exactly once."""
+    """Partition by shape, deduplicated by identity so the tied embedding
+    weight is assigned exactly once.
+
+    hidden -- 2D matrices (attention and MLP projections): weight decay, and
+              the group Muon updates.
+    misc   -- embeddings, RMSNorm gains, any 1D parameter: no decay, AdamW.
+    """
     groups: dict[str, list[nn.Parameter]] = {"hidden": [], "misc": []}
     seen: set[int] = set()
     for name, p in model.named_parameters():
@@ -106,11 +75,11 @@ def classify_parameters(model: nn.Module) -> dict[str, list[nn.Parameter]]:
 def zeropower_via_newtonschulz5(grad: torch.Tensor, steps: int = 5, eps: float = 1e-7) -> torch.Tensor:
     """Orthogonalize a 2D matrix with a quintic Newton-Schulz iteration.
 
-    Pushes the matrix's singular values toward 1 using matmuls only (no SVD).
-    The quintic coefficients are Keller Jordan's tuned constants; five steps
-    bring a well-conditioned matrix's singular values into roughly [0.7, 1.13].
-    Muon applies this to the momentum buffer so every update direction has a
-    uniform spectrum, regardless of how skewed the raw gradient is.
+    Pushes singular values toward 1 with matmuls only (no SVD); the quintic
+    coefficients are Keller Jordan's tuned constants, and five steps land a
+    well-conditioned matrix in roughly [0.7, 1.13]. Muon applies this to the
+    momentum buffer, so the update direction has a uniform spectrum however
+    skewed the raw gradient is.
     """
     assert grad.ndim == 2, "Newton-Schulz expects a 2D matrix"
     a, b, c = 3.4445, -4.7750, 2.0315
@@ -205,12 +174,9 @@ def build_optimizers(model: nn.Module, cfg: Config) -> list[torch.optim.Optimize
     return [muon, adamw]
 
 
-# =============================================================================
-# 3. Learning-rate schedule: linear warmup, then cosine decay to a floor.
-#
-# One multiplier is applied to every param group's base LR, so the distinct
-# AdamW and Muon peak LRs keep their ratio across the whole schedule.
-# =============================================================================
+# --- 3. LR schedule: linear warmup, then cosine decay to a floor -------------
+# One multiplier scales every group's base LR, so the distinct AdamW and Muon
+# peaks keep their ratio across the whole schedule.
 
 def lr_multiplier(step: int, warmup: int, max_steps: int, floor_frac: float) -> float:
     if warmup > 0 and step < warmup:
@@ -261,9 +227,7 @@ def build_scheduler(optimizers: list[torch.optim.Optimizer], cfg: Config) -> War
     return WarmupCosine(optimizers, cfg.warmup_steps, cfg.max_steps, cfg.lr_floor_frac)
 
 
-# =============================================================================
-# 4. Data stream: ShardSampler windows -> (inputs, targets) torch batches
-# =============================================================================
+# --- 4. Data stream: sampled windows -> (inputs, targets) batches ------------
 
 class DataStream:
     """Turns sampled [B, context+1] windows into next-token training pairs:
@@ -302,13 +266,10 @@ def maybe_compile(model: nn.Module, cfg: Config) -> nn.Module:
     return model
 
 
-# =============================================================================
-# 5. Checkpointing
-#
-# A checkpoint holds the model weights, every optimizer's state, the scheduler,
-# the data-sampler position, the step counter, and host RNG states -- enough to
-# resume a killed run and continue the same data stream.
-# =============================================================================
+# --- 5. Checkpointing --------------------------------------------------------
+# Weights, every optimizer's state, the scheduler, the sampler position, the
+# step counter, and host RNG: enough to pick a killed run back up on the
+# same data stream.
 
 def save_checkpoint(
     path: str | Path,
@@ -365,9 +326,7 @@ def load_model_weights(model: nn.Module, path: str | Path, device: str = "cpu") 
     model.load_state_dict(state)
 
 
-# =============================================================================
-# 6. Validation loss and perplexity
-# =============================================================================
+# --- 6. Validation loss and perplexity ---------------------------------------
 
 @torch.no_grad()
 def estimate_val_loss(model: nn.Module, val_data: DataStream, iters: int = 20) -> float:
@@ -383,9 +342,7 @@ def estimate_val_loss(model: nn.Module, val_data: DataStream, iters: int = 20) -
     return total / iters
 
 
-# =============================================================================
-# 7. The training loop, traceable top to bottom
-# =============================================================================
+# --- 7. The training loop, traceable top to bottom ---------------------------
 
 def train(
     cfg: Config,
@@ -401,12 +358,12 @@ def train(
     eval_iters: int = 20,
 ) -> list[float]:
     """Pretrain MiniGPT on packed shards; returns the per-step loss history."""
-    # --- configuration + seeding ---------------------------------------
+    # --- seeding ---
     seed_everything(cfg.seed)
     max_steps = steps if steps is not None else cfg.max_steps
     out = Path(out_dir)
 
-    # --- dataset ---------------------------------------------------------
+    # --- dataset ---
     train_data = DataStream(
         ShardSampler(data_dir, context=cfg.context, split="train", seed=cfg.seed),
         cfg.micro_batch,
@@ -422,20 +379,20 @@ def train(
     except ValueError:
         pass  # tiny corpus with no val shard
 
-    # --- model -----------------------------------------------------------
+    # --- model ---
     raw_model = MiniGPT(cfg).to(device)
-    # Route the loss through chunked cross-entropy whenever the kernels are on.
+    # Chunked cross-entropy whenever the kernels are on.
     raw_model.fused_loss = getattr(cfg, "use_triton", False)
     model = maybe_compile(raw_model, cfg)  # raw_model keeps clean state_dict keys
 
-    # --- optimizers + schedule -------------------------------------------
+    # --- optimizers + schedule ---
     # The schedule always spans cfg.max_steps; `steps` only bounds this run, so
-    # an interrupted run and its resumed continuation share one LR trajectory.
+    # an interrupted run and its continuation share one LR trajectory.
     optimizers = build_optimizers(raw_model, cfg)
     scheduler = WarmupCosine(optimizers, cfg.warmup_steps, cfg.max_steps, cfg.lr_floor_frac)
     amp_dtype = _DTYPES.get(cfg.dtype, torch.float32)
 
-    # --- resume ------------------------------------------------------------
+    # --- continue from a checkpoint ---
     step = 0
     if resume:
         payload = load_checkpoint(resume, model=raw_model, optimizers=optimizers,
@@ -445,21 +402,21 @@ def train(
             train_data.load_state_dict(payload["sampler"])
         print(f"resumed from {resume} at step {step}")
 
-    # --- the loop ------------------------------------------------------------
+    # --- the loop ---
     losses: list[float] = []
     while step < max_steps:
         model.train()
         for opt in optimizers:
             opt.zero_grad(set_to_none=True)
 
-        # One optimizer step accumulates grad_accum micro-batches, so the
-        # global batch size is independent of what fits in memory at once.
+        # grad_accum micro-batches per step, so the global batch size is
+        # independent of what fits in memory at once.
         total = 0.0
         for _ in range(cfg.grad_accum):
-            x, y = train_data.batch()                    # [B, T] inputs/targets
+            x, y = train_data.batch()                    # [B, T]
             with autocast_ctx(torch.device(device), amp_dtype):
-                _, loss = model(x, y)                    # forward + loss
-            (loss / cfg.grad_accum).backward()           # accumulate gradients
+                _, loss = model(x, y)
+            (loss / cfg.grad_accum).backward()
             total += loss.item()
 
         if cfg.grad_clip:
@@ -470,7 +427,6 @@ def train(
         step += 1
         losses.append(total / cfg.grad_accum)
 
-        # --- logging / eval / checkpoints ---
         if log_every and step % log_every == 0:
             lr = scheduler.get_last_lr()[0]
             print(f"step {step:>7} loss {losses[-1]:.4f} lr {lr:.2e}")
@@ -494,9 +450,7 @@ def train(
     return losses
 
 
-# =============================================================================
-# 8. Command-line interface
-# =============================================================================
+# --- 8. CLI ------------------------------------------------------------------
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Pretrain Mini-GPT on packed shards.")
