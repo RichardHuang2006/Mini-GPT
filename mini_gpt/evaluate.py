@@ -27,7 +27,7 @@ Inputs and outputs
     Out: results.json and a Markdown table (results.md), one row per checkpoint.
 
 Representative command (offline; add --arc-easy hf etc. to download real sets):
-    python evaluate.py --tier nano --tokenizer data/tok.json --data data/packed \
+    python -m mini_gpt.evaluate --tier nano --tokenizer data/tok.json --data data/packed \
         --ckpt base:out/nano/ckpt_final.pt --arc-easy sample --mmlu sample \
         --humaneval sample --out out/eval
 """
@@ -50,7 +50,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from tokenizer import MiniTokenizer
+from mini_gpt.tokenizer import MiniTokenizer
 
 # Chance-level baselines, reported next to every score. None means "not an
 # accuracy" (perplexity is a magnitude).
@@ -108,7 +108,7 @@ def perplexity_from_split(
 ) -> float:
     """Perplexity on n_windows sampled from the held-out split. The manifest's
     fixed train/val shard split guarantees these tokens were never trained on."""
-    from data import ShardSampler
+    from mini_gpt.data import ShardSampler
 
     sampler = ShardSampler(data_dir, context=context, split=split, seed=seed)
     return evaluate_perplexity(model, sampler.next_batch(n_windows), device=device)
@@ -213,7 +213,7 @@ def evaluate_humaneval(
 ) -> float:
     """pass@1: greedily complete each prompt, then execute prompt + completion
     + the task's check() in a sandbox. Score = fraction passing."""
-    from generate import generate
+    from mini_gpt.generate import generate
 
     model.eval()
     probs = [p if isinstance(p, HumanEvalProblem) else HumanEvalProblem(**p) for p in problems]
@@ -427,9 +427,9 @@ def _resolve_taskset(spec: str | None, metric: str, limit: int | None) -> list[d
 # =============================================================================
 
 def main(argv: list[str] | None = None) -> int:
-    from config import get_config
-    from model import MiniGPT
-    from train import load_model_weights, seed_everything
+    from mini_gpt.config import get_config
+    from mini_gpt.model import MiniGPT
+    from mini_gpt.train import load_model_weights, seed_everything
 
     taskset_help = "JSONL path, 'sample' (tiny built-in), or 'hf' (download the real set)"
     ap = argparse.ArgumentParser(
@@ -462,7 +462,7 @@ def main(argv: list[str] | None = None) -> int:
 
     windows = None
     if args.data:
-        from data import ShardSampler
+        from mini_gpt.data import ShardSampler
 
         sampler = ShardSampler(args.data, context=cfg.context, split="val", seed=cfg.seed)
         windows = sampler.next_batch(args.n_ppl_windows)

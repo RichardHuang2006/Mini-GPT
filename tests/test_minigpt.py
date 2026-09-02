@@ -11,7 +11,7 @@ Read first
     Everything else; this file is last in the reading order.
 
 Representative commands
-    python -m pytest test_minigpt.py -q                    # full suite
+    python -m pytest -q                                    # full suite
     CUDA_VISIBLE_DEVICES="" python -m pytest -q            # CPU-only: CUDA tests skip
 """
 
@@ -26,13 +26,13 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-import data as data_mod
-import evaluate as eval_mod
-import kernels
-import posttrain
-from config import TIERS, Config, get_config
-from generate import generate, generate_reply
-from model import (
+from mini_gpt import data as data_mod
+from mini_gpt import evaluate as eval_mod
+from mini_gpt import kernels
+from mini_gpt import posttrain
+from mini_gpt.config import TIERS, Config, get_config
+from mini_gpt.generate import generate, generate_reply
+from mini_gpt.model import (
     IGNORE_INDEX,
     MiniGPT,
     RMSNorm,
@@ -42,8 +42,8 @@ from model import (
     precompute_rope,
     repeat_kv,
 )
-from tokenizer import DEFAULT_VOCAB_SIZE, SPECIAL_TOKENS, MiniTokenizer
-from train import (
+from mini_gpt.tokenizer import DEFAULT_VOCAB_SIZE, SPECIAL_TOKENS, MiniTokenizer
+from mini_gpt.train import (
     DataStream,
     Muon,
     WarmupCosine,

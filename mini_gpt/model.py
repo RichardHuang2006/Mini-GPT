@@ -38,7 +38,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from config import Config
+from mini_gpt.config import Config
 
 # Positions whose target equals IGNORE_INDEX are excluded from the loss. The
 # assistant-only SFT loss works by setting every non-assistant target to this.
@@ -65,7 +65,7 @@ class RMSNorm(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # x: [..., dim] -> [..., dim], normalized over the last axis.
         if self.use_triton:
-            import kernels
+            from mini_gpt import kernels
 
             return kernels.rmsnorm(x, self.weight, self.eps)
         # Reduce in float32 for stability, then cast back to the input dtype.
@@ -227,7 +227,7 @@ class Attention(nn.Module):
             q = self.q_norm(q)
             k = self.k_norm(k)
         if self.use_triton:
-            import kernels
+            from mini_gpt import kernels
 
             q = kernels.apply_rope(q, cos, sin)
             k = kernels.apply_rope(k, cos, sin)
@@ -276,7 +276,7 @@ class SwiGLU(nn.Module):
         a = self.gate(x)
         b = self.up(x)
         if self.use_triton:
-            import kernels
+            from mini_gpt import kernels
 
             h = kernels.swiglu(a, b)
         else:
@@ -396,7 +396,7 @@ class MiniGPT(nn.Module):
         # Memory-saving path: stream the vocabulary in chunks instead of
         # materializing the full [B*T, V] logits tensor (see kernels.py).
         if self.fused_loss and tgt is not None:
-            import kernels
+            from mini_gpt import kernels
 
             loss = kernels.chunked_cross_entropy(
                 x.reshape(-1, x.size(-1)),        # [B*T, D]

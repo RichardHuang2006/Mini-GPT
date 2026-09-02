@@ -20,7 +20,7 @@ Operations and shapes
     chunked_cross_entropy(hidden [N, D], weight [V, D], targets [N]) -> scalar
 
 Representative command (differential tests; the CUDA ones skip without a GPU):
-    python -m pytest test_minigpt.py -k kernel -q
+    python -m pytest -k kernel -q
 
 No speed or memory numbers are claimed here; the one memory property that is
 guaranteed by construction -- chunked cross-entropy never materializes the full

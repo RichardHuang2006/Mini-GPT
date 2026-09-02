@@ -20,12 +20,12 @@ Inputs and outputs
 
 Representative commands
     # CPU smoke run (small model, a few steps, no compile):
-    python train.py --tier nano --data data/packed --out out/nano \
+    python -m mini_gpt.train --tier nano --data data/packed --out out/nano \
         --steps 30 --micro-batch 4 --grad-accum 2 --device cpu --no-compile
 
     # CUDA run with periodic held-out perplexity, then resume:
-    python train.py --tier mini --data data/packed --out out/mini --eval-every 1000
-    python train.py --tier mini --data data/packed --out out/mini \
+    python -m mini_gpt.train --tier mini --data data/packed --out out/mini --eval-every 1000
+    python -m mini_gpt.train --tier mini --data data/packed --out out/mini \
         --resume out/mini/ckpt_1000.pt
 """
 
@@ -43,9 +43,9 @@ import numpy as np
 import torch
 from torch import nn
 
-from config import Config, get_config
-from data import ShardSampler
-from model import MiniGPT
+from mini_gpt.config import Config, get_config
+from mini_gpt.data import ShardSampler
+from mini_gpt.model import MiniGPT
 
 _DTYPES = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}
 

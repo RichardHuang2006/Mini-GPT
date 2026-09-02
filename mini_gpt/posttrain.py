@@ -22,15 +22,15 @@ Inputs and outputs
 
 Representative commands
     # SFT on offline synthetic conversations (CPU-friendly smoke):
-    python posttrain.py sft --tier nano --tokenizer data/tok.json \
+    python -m mini_gpt.posttrain sft --tier nano --tokenizer data/tok.json \
         --init out/nano/ckpt_final.pt --data synthetic --out out/nano_sft --steps 20
 
     # GRPO on GSM8K (DOWNLOADS the GSM8K dataset from HuggingFace):
-    python posttrain.py grpo --tier mini --tokenizer data/tok.json \
+    python -m mini_gpt.posttrain grpo --tier mini --tokenizer data/tok.json \
         --init out/mini_sft/ckpt_sft.pt --task gsm8k --out out/mini_grpo --steps 500
 
     # GRPO on the offline arithmetic task (no downloads):
-    python posttrain.py grpo --tier nano --tokenizer data/tok.json \
+    python -m mini_gpt.posttrain grpo --tier nano --tokenizer data/tok.json \
         --init out/nano_sft/ckpt_sft.pt --task arithmetic --out out/nano_grpo --steps 30
 """
 
@@ -47,11 +47,11 @@ from typing import Any, Callable, Iterator, Literal, Sequence
 import torch
 from torch import nn
 
-from config import Config, get_config
-from generate import generate
-from model import MiniGPT
-from tokenizer import MiniTokenizer
-from train import (
+from mini_gpt.config import Config, get_config
+from mini_gpt.generate import generate
+from mini_gpt.model import MiniGPT
+from mini_gpt.tokenizer import MiniTokenizer
+from mini_gpt.train import (
     WarmupCosine,
     autocast_ctx,
     build_optimizers,

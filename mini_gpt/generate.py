@@ -15,7 +15,7 @@ Inputs and outputs
     CLI: a checkpoint + tokenizer + prompt -> printed text.
 
 Representative command
-    python generate.py --ckpt out/nano/ckpt_final.pt --tokenizer data/tok.json \
+    python -m mini_gpt.generate --ckpt out/nano/ckpt_final.pt --tokenizer data/tok.json \
         --tier nano --prompt "the quick brown" --max-new-tokens 40 \
         --temperature 0.8 --top-k 40 --seed 0
 """
@@ -28,7 +28,7 @@ from typing import Sequence
 import torch
 from torch import nn
 
-from tokenizer import MiniTokenizer
+from mini_gpt.tokenizer import MiniTokenizer
 
 
 @torch.no_grad()
@@ -116,7 +116,7 @@ def generate_reply(
     """
     # Imported lazily: posttrain.py (which owns the chat template) imports this
     # module for GRPO rollouts, so a top-level import here would be circular.
-    from posttrain import build_prompt
+    from mini_gpt.posttrain import build_prompt
 
     prompt = build_prompt(messages, tokenizer)
     idx = torch.tensor([prompt], dtype=torch.long, device=next(model.parameters()).device)
@@ -140,9 +140,9 @@ def generate_reply(
 # =============================================================================
 
 def main(argv: list[str] | None = None) -> int:
-    from config import get_config
-    from model import MiniGPT
-    from train import load_model_weights, seed_everything
+    from mini_gpt.config import get_config
+    from mini_gpt.model import MiniGPT
+    from mini_gpt.train import load_model_weights, seed_everything
 
     ap = argparse.ArgumentParser(description="Generate text from a Mini-GPT checkpoint.")
     ap.add_argument("--ckpt", required=True, help="checkpoint from train.py / posttrain.py")

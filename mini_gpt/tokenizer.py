@@ -16,7 +16,7 @@ Inputs and outputs
     save()/load(): a single JSON file on disk.
 
 Representative command (train a tokenizer as part of data preparation):
-    python data.py --source synthetic --parts 2 --docs-per-part 2000 \
+    python -m mini_gpt.data --source synthetic --parts 2 --docs-per-part 2000 \
         --tokenizer data/tok.json --data data/packed --shard-tokens 100000
 """
 

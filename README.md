@@ -1,8 +1,10 @@
 # Mini-GPT
 
 A from-scratch GPT pipeline — tokenizer, pretraining, Triton kernels, SFT, GRPO,
-and evaluation — reorganized as an **executable textbook**: ten Python files at
-the repository root, each teaching one major concept, readable in order.
+and evaluation — organized as an **executable textbook**: nine Python modules in
+one `mini_gpt/` package plus a single test suite in `tests/`, each module
+teaching one major concept, readable in order. The layout matches the sibling
+Mini-* repositories (a source package beside a `tests/` folder).
 
 ## 1. What Mini-GPT teaches
 
@@ -74,29 +76,29 @@ final checkpoint ─── evaluate.py: perplexity / ARC / MMLU / HumanEval
 
 | File | One-line responsibility |
 | --- | --- |
-| `config.py` | The `Config` dataclass and the `nano` / `mini` / `small` presets. |
-| `tokenizer.py` | 32K byte-level BPE with fixed-ID conversation/tool special tokens. |
-| `data.py` | Fetch text (ClimbMix or synthetic), pack uint16 shards, sample windows. |
-| `model.py` | The eager Transformer: GQA, RoPE, QK-norm, RMSNorm, SwiGLU, windows. |
-| `kernels.py` | Triton kernels + eager references + automatic fallback. |
-| `train.py` | AdamW + Muon, LR schedule, training loop, checkpoints, seeding. |
-| `generate.py` | Greedy / temperature / top-k sampling with context enforcement. |
-| `posttrain.py` | Chat template, SFT, GSM8K rewards, GRPO, `sft`/`grpo` CLIs. |
-| `evaluate.py` | Perplexity, ARC/MMLU multiple choice, sandboxed HumanEval, reports. |
-| `test_minigpt.py` | The whole test suite, ordered like the reading order. |
+| `mini_gpt/config.py` | The `Config` dataclass and the `nano` / `mini` / `small` presets. |
+| `mini_gpt/tokenizer.py` | 32K byte-level BPE with fixed-ID conversation/tool special tokens. |
+| `mini_gpt/data.py` | Fetch text (ClimbMix or synthetic), pack uint16 shards, sample windows. |
+| `mini_gpt/model.py` | The eager Transformer: GQA, RoPE, QK-norm, RMSNorm, SwiGLU, windows. |
+| `mini_gpt/kernels.py` | Triton kernels + eager references + automatic fallback. |
+| `mini_gpt/train.py` | AdamW + Muon, LR schedule, training loop, checkpoints, seeding. |
+| `mini_gpt/generate.py` | Greedy / temperature / top-k sampling with context enforcement. |
+| `mini_gpt/posttrain.py` | Chat template, SFT, GSM8K rewards, GRPO, `sft`/`grpo` CLIs. |
+| `mini_gpt/evaluate.py` | Perplexity, ARC/MMLU multiple choice, sandboxed HumanEval, reports. |
+| `tests/test_minigpt.py` | The whole test suite, ordered like the reading order. |
 
 ## 5. Recommended file-reading order
 
-1. `config.py` — every knob in one dataclass.
-2. `tokenizer.py` — text ↔ token IDs.
-3. `data.py` — token IDs → shards → training windows.
-4. `model.py` — the Transformer itself.
-5. `train.py` — optimizers, schedule, loop, checkpoints.
-6. `generate.py` — sampling from a trained model.
-7. `kernels.py` — the same math, fused in Triton.
-8. `posttrain.py` — SFT and GRPO.
-9. `evaluate.py` — how the model is scored.
-10. `test_minigpt.py` — every guarantee, as assertions.
+1. `mini_gpt/config.py` — every knob in one dataclass.
+2. `mini_gpt/tokenizer.py` — text ↔ token IDs.
+3. `mini_gpt/data.py` — token IDs → shards → training windows.
+4. `mini_gpt/model.py` — the Transformer itself.
+5. `mini_gpt/train.py` — optimizers, schedule, loop, checkpoints.
+6. `mini_gpt/generate.py` — sampling from a trained model.
+7. `mini_gpt/kernels.py` — the same math, fused in Triton.
+8. `mini_gpt/posttrain.py` — SFT and GRPO.
+9. `mini_gpt/evaluate.py` — how the model is scored.
+10. `tests/test_minigpt.py` — every guarantee, as assertions.
 
 Each file's docstring states what it teaches, what to read first, its inputs
 and outputs, and a representative command.
@@ -156,7 +158,7 @@ pip install -r requirements.txt
 ## 8. Preparing synthetic data (offline, seconds)
 
 ```bash
-python data.py --source synthetic --parts 2 --docs-per-part 2000 \
+python -m mini_gpt.data --source synthetic --parts 2 --docs-per-part 2000 \
     --tokenizer data/tok.json --data data/packed --shard-tokens 100000
 ```
 
@@ -170,11 +172,11 @@ held-out validation shard. Fully deterministic and network-free.
 
 ```bash
 # small first taste (~1000 documents from the raw-text mirror):
-python data.py --source hf-raw --parts 1 --docs-per-part 1000 \
+python -m mini_gpt.data --source hf-raw --parts 1 --docs-per-part 1000 \
     --tokenizer data/tok.json --data data/packed --shard-tokens 1000000
 
 # EXPENSIVE: a real pretraining corpus (tens of GB, hours of download):
-python data.py --source hf-raw --parts 64 --docs-per-part 20000 \
+python -m mini_gpt.data --source hf-raw --parts 64 --docs-per-part 20000 \
     --tokenizer data/tok.json --data data/packed --shard-tokens 50000000
 ```
 
@@ -187,25 +189,25 @@ stopped.
 ## 10. Pretraining with AdamW and Muon
 
 Parameters are split by shape: **Muon** (momentum orthogonalized by
-Newton–Schulz iteration, `train.py:zeropower_via_newtonschulz5`) updates the 2D
+Newton–Schulz iteration, `mini_gpt/train.py:zeropower_via_newtonschulz5`) updates the 2D
 hidden matrices; **AdamW** updates embeddings and norm gains. `--optimizer
 adamw` gives the pure-AdamW baseline. Warmup then cosine decay; gradient
 accumulation; bf16 autocast on CUDA; gradient clipping.
 
 ```bash
 # CPU smoke run (minutes):
-python train.py --tier nano --data data/packed --out out/nano \
+python -m mini_gpt.train --tier nano --data data/packed --out out/nano \
     --steps 30 --micro-batch 4 --grad-accum 2 --device cpu --no-compile
 
 # EXPENSIVE: CUDA training with periodic held-out perplexity:
-python train.py --tier mini --data data/packed --out out/mini --eval-every 1000
+python -m mini_gpt.train --tier mini --data data/packed --out out/mini --eval-every 1000
 
 # resume from a checkpoint (continues the same data stream and LR schedule):
-python train.py --tier mini --data data/packed --out out/mini \
+python -m mini_gpt.train --tier mini --data data/packed --out out/mini \
     --resume out/mini/ckpt_1000.pt
 
 # pure-AdamW baseline for an A/B comparison:
-python train.py --tier mini --data data/packed --out out/mini_adamw --optimizer adamw
+python -m mini_gpt.train --tier mini --data data/packed --out out/mini_adamw --optimizer adamw
 ```
 
 Checkpoints hold model weights, both optimizers' state, the scheduler, the
@@ -235,12 +237,12 @@ measure on your machine.
 ## 12. Text generation
 
 ```bash
-python generate.py --ckpt out/nano/ckpt_final.pt --tokenizer data/tok.json \
+python -m mini_gpt.generate --ckpt out/nano/ckpt_final.pt --tokenizer data/tok.json \
     --tier nano --prompt "the quick brown" --max-new-tokens 40 \
     --temperature 0.8 --top-k 40 --seed 0
 
 # chat-formatted prompt through the same template SFT trains on:
-python generate.py --ckpt out/nano_sft/ckpt_sft.pt --tokenizer data/tok.json \
+python -m mini_gpt.generate --ckpt out/nano_sft/ckpt_sft.pt --tokenizer data/tok.json \
     --tier nano --chat "What is 2 + 3?" --max-new-tokens 16
 ```
 
@@ -258,11 +260,11 @@ boundaries.
 
 ```bash
 # offline smoke run on synthetic arithmetic conversations (CPU, ~a minute):
-python posttrain.py sft --tier nano --tokenizer data/tok.json \
+python -m mini_gpt.posttrain sft --tier nano --tokenizer data/tok.json \
     --init out/nano/ckpt_final.pt --data synthetic --out out/nano_sft --steps 20
 
 # real chat data: a JSONL of {"messages": [{"role": ..., "content": ...}]}
-python posttrain.py sft --tier mini --tokenizer data/tok.json \
+python -m mini_gpt.posttrain sft --tier mini --tokenizer data/tok.json \
     --init out/mini/ckpt_final.pt --data chats.jsonl --out out/mini_sft --steps 2000
 ```
 
@@ -277,11 +279,11 @@ produces exactly zero gradient. The GSM8K reward extracts the final integer
 
 ```bash
 # GRPO on GSM8K (DOWNLOADS openai/gsm8k; EXPENSIVE at real scale):
-python posttrain.py grpo --tier mini --tokenizer data/tok.json \
+python -m mini_gpt.posttrain grpo --tier mini --tokenizer data/tok.json \
     --init out/mini_sft/ckpt_sft.pt --task gsm8k --out out/mini_grpo --steps 500
 
 # offline smoke run on the arithmetic task (no downloads, CPU-sized):
-python posttrain.py grpo --tier nano --tokenizer data/tok.json \
+python -m mini_gpt.posttrain grpo --tier nano --tokenizer data/tok.json \
     --init out/nano_sft/ckpt_sft.pt --task arithmetic --out out/nano_grpo \
     --steps 10 --group-size 4 --prompts-per-step 2 --max-new-tokens 8
 ```
@@ -307,23 +309,23 @@ downloads), or `hf` (**downloads the real dataset**).
 
 ```bash
 # perplexity only (offline, needs the packed val split):
-python evaluate.py --tier nano --tokenizer data/tok.json --data data/packed \
+python -m mini_gpt.evaluate --tier nano --tokenizer data/tok.json --data data/packed \
     --ckpt base:out/nano/ckpt_final.pt --out out/eval
 
 # ARC (downloads allenai/ai2_arc):
-python evaluate.py --tier mini --tokenizer data/tok.json \
+python -m mini_gpt.evaluate --tier mini --tokenizer data/tok.json \
     --ckpt base:out/mini/ckpt_final.pt --arc-easy hf --arc-challenge hf --out out/eval
 
 # MMLU (downloads cais/mmlu; --limit caps question count):
-python evaluate.py --tier mini --tokenizer data/tok.json \
+python -m mini_gpt.evaluate --tier mini --tokenizer data/tok.json \
     --ckpt base:out/mini/ckpt_final.pt --mmlu hf --limit 500 --out out/eval
 
 # HumanEval (downloads openai/openai_humaneval; executes generated code):
-python evaluate.py --tier mini --tokenizer data/tok.json \
+python -m mini_gpt.evaluate --tier mini --tokenizer data/tok.json \
     --ckpt base:out/mini/ckpt_final.pt --humaneval hf --out out/eval
 
 # several checkpoints in one table (base -> sft -> grpo rows):
-python evaluate.py --tier mini --tokenizer data/tok.json --data data/packed \
+python -m mini_gpt.evaluate --tier mini --tokenizer data/tok.json --data data/packed \
     --ckpt base:out/mini/ckpt_final.pt --ckpt sft:out/mini_sft/ckpt_sft.pt \
     --ckpt grpo:out/mini_grpo/ckpt_grpo.pt --arc-easy hf --out out/eval
 ```
@@ -338,7 +340,7 @@ fixtures; this repository ships no recorded benchmark results.
 ```bash
 python -m pytest -q                                  # full suite
 CUDA_VISIBLE_DEVICES="" python -m pytest -q          # CPU-only: CUDA tests skip
-python -m pytest test_minigpt.py -k "triton or chunked" -q   # kernel tests only
+python -m pytest -k "triton or chunked" -q           # kernel tests only
 ```
 
 The suite covers: tokenizer round-trips and stable special IDs; causal and
@@ -366,8 +368,10 @@ on them (all remain on the `full-pipeline` branch):
   is the real task).
 - **Wrapper classes** (`CombinedOptimizer`, `Trainer`) — replaced by a plain
   list of optimizers and a flat, traceable training loop.
-- `Makefile` and `pytest.ini` (plain commands above), per-package
-  `__init__.py` files, and duplicate script entry points.
+- `Makefile` and duplicate script entry points. (The per-subpackage
+  `__init__.py` files went with them; a single package `__init__.py` and a
+  small `pytest.ini` returned when the code moved into the `mini_gpt/`
+  package to match the sibling repositories' layout.)
 - CUDA RNG capture in checkpoints (host RNG, optimizer, scheduler, and data
   sampler state are still checkpointed; resume is exact on the tested CPU
   path).

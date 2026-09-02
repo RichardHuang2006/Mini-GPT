@@ -21,11 +21,11 @@ Inputs and outputs
 
 Representative commands
     # offline synthetic corpus (small, no network):
-    python data.py --source synthetic --parts 2 --docs-per-part 2000 \
+    python -m mini_gpt.data --source synthetic --parts 2 --docs-per-part 2000 \
         --tokenizer data/tok.json --data data/packed --shard-tokens 100000
 
     # ClimbMix-derived corpus (DOWNLOADS a large dataset from HuggingFace):
-    python data.py --source hf-raw --parts 64 --docs-per-part 20000 \
+    python -m mini_gpt.data --source hf-raw --parts 64 --docs-per-part 20000 \
         --tokenizer data/tok.json --data data/packed --shard-tokens 50000000
 """
 
@@ -40,7 +40,7 @@ from typing import Any, Callable, Iterable, Iterator
 
 import numpy as np
 
-from tokenizer import DEFAULT_VOCAB_SIZE, MiniTokenizer
+from mini_gpt.tokenizer import DEFAULT_VOCAB_SIZE, MiniTokenizer
 
 # Token IDs are stored as uint16: lossless because the vocab is < 65,536, and
 # half the disk and page-cache footprint of int32.
