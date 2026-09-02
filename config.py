@@ -1,12 +1,26 @@
-"""Mini-GPT configuration.
+"""Configuration: one dataclass carrying every model and training knob.
 
-One ``Config`` dataclass carries every architectural and training knob, with three
-presets: ``nano``, ``mini``, ``small``. Nothing downstream hardcodes a dimension;
-the model, optimizer, data sampler, and kernels all read their shapes from here.
+What this file teaches
+    How all the moving parts of the project are parameterized: the tokenizer
+    vocabulary, the transformer's shape, the attention pattern, the two
+    optimizers' learning rates, and the runtime toggles (precision, Triton,
+    torch.compile). Nothing downstream hardcodes a dimension -- the model,
+    optimizers, data sampler, and kernels all read their shapes from here.
 
-``param_count`` counts the fields exactly as the eager model builds the weights --
-tied embeddings, per-head QK-norm gains, two RMSNorm gains per layer plus a final
-one, no biases -- so the reported count is the count the model will have.
+Read first
+    Nothing; this is the entry point of the reading order.
+
+Inputs and outputs
+    get_config(tier, **overrides) -> a validated Config. Three presets:
+      nano  -- CPU-friendly smoke-test tier (context 512), used by the tests
+               and the CPU training example;
+      mini  -- the single-GPU overnight default (context 1024);
+      small -- the resume-scale configuration: 32,768-token vocabulary and the
+               full 2,048-token context.
+
+``param_count`` counts fields exactly as model.py builds the weights -- tied
+embeddings counted once, per-head QK-norm gains, two RMSNorm gains per layer
+plus a final one, no biases -- and the built model is checked against it.
 """
 
 from __future__ import annotations
@@ -68,8 +82,7 @@ class Config:
     use_muon: bool = True       # False -> pure-AdamW A/B baseline
 
     # --- data budget --------------------------------------------------------
-    train_tokens: int = 2_000_000_000
-    anneal_frac: float = 0.02   # last 2% switches to the math/instruct mix
+    train_tokens: int = 2_000_000_000  # target tokens = max_steps * global batch
 
     # --- runtime ------------------------------------------------------------
     seed: int = 0
@@ -96,7 +109,6 @@ class Config:
         )
         assert self.vocab_size % 128 == 0, "vocab should tile cleanly (multiple of 128)"
         assert self.window <= self.context, "sliding window cannot exceed context"
-        assert 0.0 <= self.anneal_frac < 1.0
         assert self.n_layers > 0 and self.d_model > 0
 
     # -------------------------------------------------------- derived values
@@ -145,8 +157,9 @@ class Config:
 
 
 # ---------------------------------------------------------------------------
-# Tier presets: `nano` is the sub-hour CI tier, `mini` the overnight default,
-# `small` a larger configuration.
+# Tier presets: `nano` is the CPU-friendly smoke-test tier, `mini` the
+# single-GPU overnight default, and `small` the resume-scale configuration
+# with the full 2,048-token context.
 # ---------------------------------------------------------------------------
 
 TIERS: dict[str, Config] = {
