@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterator, Literal, Sequence
 
+from datasets import load_dataset
 import torch
 from torch import nn
 
@@ -617,8 +618,6 @@ def build_gsm8k_bank(
     Rows are {"question", "answer"}, the answer ending '#### <gold>'. Commas
     are stripped ('1,200' -> '1200') before extraction.
     """
-    from datasets import load_dataset  # lazy: only the gsm8k task needs it
-
     ds = load_dataset("openai/gsm8k", "main", split=split)
     bank = []
     for row in ds:

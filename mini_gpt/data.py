@@ -14,6 +14,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
 
+from datasets import load_dataset
 import numpy as np
 
 from mini_gpt.tokenizer import DEFAULT_VOCAB_SIZE, MiniTokenizer
@@ -46,8 +47,6 @@ def synthetic_docs(n: int, *, seed: int = 0) -> Iterator[str]:
 
 def iter_climbmix_raw(streaming: bool = True) -> Iterator[str]:  # pragma: no cover - network
     """Stream the community raw-text mirror of ClimbMix (OptimalScale/ClimbMix)."""
-    from datasets import load_dataset
-
     ds = load_dataset("OptimalScale/ClimbMix", split="train", streaming=streaming)
     for row in ds:
         text = row.get("text")
@@ -59,8 +58,7 @@ def iter_climbmix_tokens(streaming: bool = True) -> Iterator[str]:  # pragma: no
     """Stream NVIDIA's token-ID release (nvidia/Nemotron-ClimbMix), GPT-2
     detokenized because training a new 32K BPE needs raw text. Needs the
     optional `tiktoken` package."""
-    import tiktoken
-    from datasets import load_dataset
+    import tiktoken  # optional dep: not installed by requirements.txt
 
     enc = tiktoken.get_encoding("gpt2")
     ds = load_dataset("nvidia/Nemotron-ClimbMix", split="train", streaming=streaming)

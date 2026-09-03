@@ -17,6 +17,7 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
+from mini_gpt import kernels
 from mini_gpt.config import Config
 
 # Targets set to IGNORE_INDEX drop out of the loss; this is how the SFT loss
@@ -39,8 +40,6 @@ class RMSNorm(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.use_triton:
-            from mini_gpt import kernels
-
             return kernels.rmsnorm(x, self.weight, self.eps)
         # Reduce in float32 for stability, then cast back to the input dtype.
         dtype = x.dtype
@@ -180,8 +179,6 @@ class Attention(nn.Module):
             q = self.q_norm(q)
             k = self.k_norm(k)
         if self.use_triton:
-            from mini_gpt import kernels
-
             q = kernels.apply_rope(q, cos, sin)
             k = kernels.apply_rope(k, cos, sin)
         else:
@@ -224,8 +221,6 @@ class SwiGLU(nn.Module):
         a = self.gate(x)
         b = self.up(x)
         if self.use_triton:
-            from mini_gpt import kernels
-
             h = kernels.swiglu(a, b)
         else:
             h = F.silu(a) * b
@@ -333,8 +328,6 @@ class MiniGPT(nn.Module):
                 tgt = tgt.masked_fill(loss_mask == 0, IGNORE_INDEX)
 
         if self.fused_loss and tgt is not None:
-            from mini_gpt import kernels
-
             loss = kernels.chunked_cross_entropy(
                 x.reshape(-1, x.size(-1)),        # [B*T, D]
                 self.lm_head.weight,              # [V, D] (the tied embedding)

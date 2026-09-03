@@ -16,6 +16,7 @@ import numpy as np
 import pytest
 import torch
 import torch.nn.functional as F
+from tokenizers import Tokenizer, models, pre_tokenizers, trainers
 from torch import nn
 
 from mini_gpt import data as data_mod
@@ -135,8 +136,6 @@ def test_save_load_roundtrip(tok, tmp_path):
 
 
 def test_loading_tokenizer_without_specials_raises(tmp_path):
-    from tokenizers import Tokenizer, models, pre_tokenizers, trainers
-
     backend = Tokenizer(models.BPE(unk_token=None))
     backend.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
     trainer = trainers.BpeTrainer(vocab_size=300, special_tokens=[], show_progress=False)

@@ -18,12 +18,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
+from datasets import load_dataset
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
 
+from mini_gpt.config import get_config
+from mini_gpt.data import ShardSampler
+from mini_gpt.generate import generate
+from mini_gpt.model import MiniGPT
 from mini_gpt.tokenizer import MiniTokenizer
+from mini_gpt.train import load_model_weights, seed_everything
 
 # Reported next to every score. None means "not an accuracy".
 CHANCE_BASELINES: dict[str, float | None] = {
@@ -76,8 +82,6 @@ def perplexity_from_split(
 ) -> float:
     """Perplexity on n_windows from the held-out split; the manifest's fixed
     train/val shard split is what guarantees these tokens are unseen."""
-    from mini_gpt.data import ShardSampler
-
     sampler = ShardSampler(data_dir, context=context, split=split, seed=seed)
     return evaluate_perplexity(model, sampler.next_batch(n_windows), device=device)
 
@@ -175,8 +179,6 @@ def evaluate_humaneval(
 ) -> float:
     """pass@1: greedily complete each prompt, then execute prompt + completion
     + the task's check() in a sandbox. Score = fraction passing."""
-    from mini_gpt.generate import generate
-
     model.eval()
     probs = [p if isinstance(p, HumanEvalProblem) else HumanEvalProblem(**p) for p in problems]
     if not probs:
@@ -305,8 +307,6 @@ SAMPLE_HUMANEVAL = [
 def load_arc(subset: str, *, split: str = "test", limit: int | None = None) -> list[dict]:
     """ARC from HuggingFace (allenai/ai2_arc; subset 'ARC-Easy' or
     'ARC-Challenge') -> the internal question format. Downloads on first use."""
-    from datasets import load_dataset
-
     ds = load_dataset("allenai/ai2_arc", subset, split=split)
     out = []
     for row in ds:
@@ -326,8 +326,6 @@ def load_arc(subset: str, *, split: str = "test", limit: int | None = None) -> l
 def load_mmlu(*, split: str = "test", limit: int | None = None) -> list[dict]:
     """MMLU from HuggingFace (cais/mmlu, 'all') -> the internal question
     format. Downloads on first use."""
-    from datasets import load_dataset
-
     ds = load_dataset("cais/mmlu", "all", split=split)
     out = []
     for row in ds:
@@ -344,8 +342,6 @@ def load_mmlu(*, split: str = "test", limit: int | None = None) -> list[dict]:
 def load_humaneval(*, limit: int | None = None) -> list[dict]:
     """HumanEval from HuggingFace (openai/openai_humaneval): rows already carry
     prompt / test / entry_point. Downloads on first use."""
-    from datasets import load_dataset
-
     ds = load_dataset("openai/openai_humaneval", split="test")
     out = []
     for row in ds:
@@ -382,10 +378,6 @@ def _resolve_taskset(spec: str | None, metric: str, limit: int | None) -> list[d
 # --- 6. CLI ------------------------------------------------------------------
 
 def main(argv: list[str] | None = None) -> int:
-    from mini_gpt.config import get_config
-    from mini_gpt.model import MiniGPT
-    from mini_gpt.train import load_model_weights, seed_everything
-
     taskset_help = "JSONL path, 'sample' (tiny built-in), or 'hf' (download the real set)"
     ap = argparse.ArgumentParser(
         description="Score checkpoints on perplexity / ARC / MMLU / HumanEval."
@@ -417,8 +409,6 @@ def main(argv: list[str] | None = None) -> int:
 
     windows = None
     if args.data:
-        from mini_gpt.data import ShardSampler
-
         sampler = ShardSampler(args.data, context=cfg.context, split="val", seed=cfg.seed)
         windows = sampler.next_batch(args.n_ppl_windows)
 

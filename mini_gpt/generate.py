@@ -11,7 +11,10 @@ from typing import Sequence
 import torch
 from torch import nn
 
+from mini_gpt.config import get_config
+from mini_gpt.model import MiniGPT
 from mini_gpt.tokenizer import MiniTokenizer
+from mini_gpt.train import load_model_weights, seed_everything
 
 
 @torch.no_grad()
@@ -115,10 +118,6 @@ def generate_reply(
 # --- CLI ---------------------------------------------------------------------
 
 def main(argv: list[str] | None = None) -> int:
-    from mini_gpt.config import get_config
-    from mini_gpt.model import MiniGPT
-    from mini_gpt.train import load_model_weights, seed_everything
-
     ap = argparse.ArgumentParser(description="Generate text from a Mini-GPT checkpoint.")
     ap.add_argument("--ckpt", required=True, help="checkpoint from train.py / posttrain.py")
     ap.add_argument("--tokenizer", required=True, help="trained tokenizer json")
