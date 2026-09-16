@@ -1,21 +1,13 @@
-"""One Config dataclass holding every model and training knob.
-
-Nothing downstream hardcodes a dimension. Three tiers: nano (CPU smoke,
-context 512), mini (single-GPU, 1024), small (full scale, 2048).
-"""
+"""Config dataclass and the nano / mini / small tier presets."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from typing import NamedTuple
 
 
 def swiglu_hidden(d_model: int, multiple: int = 128) -> int:
-    """SwiGLU hidden width ~= 8/3 * d_model, rounded to a multiple of 128.
-
-    8/3 matches a plain 4*d_model GELU MLP's parameter count; the rounding
-    keeps GEMM shapes tile-friendly.
-    """
+    """SwiGLU hidden width ~= 8/3 * d_model, rounded to a multiple of 128."""
     target = (8 * d_model) / 3
     return int(round(target / multiple)) * multiple
 
@@ -28,13 +20,10 @@ class ParamCount(NamedTuple):
 
 @dataclass
 class Config:
-    # --- identity -----------------------------------------------------------
     name: str = "mini"
-
-    # --- tokenizer / vocab --------------------------------------------------
     vocab_size: int = 32_768
 
-    # --- model shape --------------------------------------------------------
+    # model shape
     d_model: int = 512
     n_layers: int = 8
     n_q_heads: int = 8
@@ -43,13 +32,13 @@ class Config:
     mlp_hidden: int = 1_408
     context: int = 1_024
 
-    # --- attention detail ---------------------------------------------------
-    window: int = 256          # sliding-window span
-    full_attn_every: int = 2    # every Nth layer is full-context, the rest windowed
+    # attention
+    window: int = 256            # sliding-window span
+    full_attn_every: int = 2     # every Nth layer is full-context, the rest windowed
     rope_base: float = 10_000.0  # rescaled when extending the context length
     qk_norm: bool = True
 
-    # --- optimization -------------------------------------------------------
+    # optimization
     micro_batch: int = 16       # sequences per forward; the largest that fits
     grad_accum: int = 32        # micro-batches per optimizer step
     lr_adamw: float = 3.0e-3    # embeddings, norms
@@ -62,20 +51,18 @@ class Config:
     lr_floor_frac: float = 0.1  # cosine decays to this fraction of peak
     use_muon: bool = True       # False -> pure-AdamW A/B baseline
 
-    # --- data budget --------------------------------------------------------
     train_tokens: int = 2_000_000_000  # target tokens = max_steps * global batch
 
-    # --- runtime ------------------------------------------------------------
+    # runtime
     seed: int = 0
     dtype: str = "bfloat16"
     compile: bool = True
-    use_triton: bool = True     # route through the fused kernels
-    ce_chunk: int = 8192        # vocab tile for chunked cross-entropy
+    use_triton: bool = True  # route through the fused kernels
+    ce_chunk: int = 8192     # vocab tile for chunked cross-entropy
 
     def __post_init__(self) -> None:
         self.validate()
 
-    # ---------------------------------------------------------------- checks
     def validate(self) -> None:
         assert self.d_model == self.n_q_heads * self.head_dim, (
             f"d_model ({self.d_model}) must equal n_q_heads * head_dim "
@@ -92,7 +79,6 @@ class Config:
         assert self.window <= self.context, "sliding window cannot exceed context"
         assert self.n_layers > 0 and self.d_model > 0
 
-    # -------------------------------------------------------- derived values
     @property
     def kv_dim(self) -> int:
         return self.n_kv_heads * self.head_dim
@@ -106,15 +92,11 @@ class Config:
         return self.micro_batch * self.grad_accum * self.context
 
     def is_full_attention_layer(self, layer_idx: int) -> bool:
-        """Layer schedule: full-context on every ``full_attn_every``-th layer,
-        sliding-window on the rest."""
+        """True on every full_attn_every-th layer, which runs full-context."""
         return (layer_idx + 1) % self.full_attn_every == 0
 
-    # ------------------------------------------------------- parameter count
     def param_count(self) -> ParamCount:
-        """Count fields exactly as model.py builds them: tied embeddings once,
-        per-head QK-norm gains, two RMSNorm gains per layer plus a final one,
-        no biases. The tests assert the built model matches."""
+        """Parameter count as model.py builds it; the tests assert they agree."""
         d = self.d_model
         embedding = self.vocab_size * d  # tied input/output projection
 
@@ -136,7 +118,7 @@ class Config:
         return ParamCount(total=total, embedding=embedding, non_embedding=non_embedding)
 
     def with_overrides(self, **kwargs) -> "Config":
-        """Return a copy with fields replaced (re-validated)."""
+        """Return a re-validated copy with fields replaced."""
         return replace(self, **kwargs)
 
 
@@ -190,7 +172,7 @@ TIERS: dict[str, Config] = {
 
 
 def get_config(tier: str = "mini", **overrides) -> Config:
-    """Fetch a tier preset (a fresh copy), optionally overriding fields."""
+    """Fetch a fresh copy of a tier preset, optionally overriding fields."""
     if tier not in TIERS:
         raise KeyError(f"unknown tier {tier!r}; choose from {sorted(TIERS)}")
     cfg = replace(TIERS[tier])

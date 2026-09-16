@@ -1,9 +1,4 @@
-"""Evaluation: held-out perplexity, ARC, MMLU, and HumanEval.
-
-Three ways a small LM is scored, in file order: perplexity over data.py's
-held-out val split, length-normalized multiple choice, and sandboxed execution
-of generated code. Scores exist only in the results.json a run writes.
-"""
+"""Evaluation: held-out perplexity, ARC, MMLU, and HumanEval."""
 
 from __future__ import annotations
 
@@ -41,8 +36,6 @@ CHANCE_BASELINES: dict[str, float | None] = {
 }
 
 
-# --- 1. Held-out perplexity --------------------------------------------------
-
 @torch.no_grad()
 def evaluate_perplexity(
     model: nn.Module,
@@ -51,9 +44,7 @@ def evaluate_perplexity(
     device: torch.device | str = "cpu",
     batch_size: int = 8,
 ) -> float:
-    """Token-weighted perplexity over [N, T+1] windows: exp(nll / tokens), the
-    model's effective branching factor. Windows must come from a split it never
-    trained on."""
+    """Token-weighted perplexity over [N, T+1] windows: exp(nll / tokens)."""
     model.eval()
     w = torch.as_tensor(np.asarray(windows), dtype=torch.long)
     total_nll = 0.0
@@ -80,14 +71,10 @@ def perplexity_from_split(
     seed: int = 0,
     split: str = "val",
 ) -> float:
-    """Perplexity on n_windows from the held-out split; the manifest's fixed
-    train/val shard split is what guarantees these tokens are unseen."""
+    """Perplexity on n_windows drawn from the manifest's held-out split."""
     sampler = ShardSampler(data_dir, context=context, split=split, seed=seed)
     return evaluate_perplexity(model, sampler.next_batch(n_windows), device=device)
 
-
-# --- 2. Multiple choice (ARC, MMLU) ------------------------------------------
-# A question is {"prompt": str, "choices": [str, ...], "answer": int}.
 
 @torch.no_grad()
 def _continuation_logprob(
@@ -118,9 +105,11 @@ def evaluate_multiple_choice(
     *,
     device: torch.device | str = "cpu",
 ) -> float:
-    """Accuracy under length-normalized log-likelihood: each choice's summed
-    log-prob divided by its token count, argmax wins. Normalizing is what stops
-    short answers from winning on brevity."""
+    """Accuracy under length-normalized log-likelihood over {prompt, choices, answer}.
+
+    Dividing each choice's summed log-prob by its token count is what stops
+    short answers from winning on brevity.
+    """
     model.eval()
     if not questions:
         return 0.0
@@ -138,8 +127,6 @@ def evaluate_multiple_choice(
     return correct / len(questions)
 
 
-# --- 3. HumanEval: sandboxed pass@1 ------------------------------------------
-
 @dataclass
 class HumanEvalProblem:
     prompt: str        # the function signature + docstring the model completes
@@ -148,9 +135,7 @@ class HumanEvalProblem:
 
 
 def run_code_sandbox(program: str, *, timeout: float = 5.0) -> bool:
-    """Run `program` in an isolated subprocess; True iff it exits cleanly.
-    Isolation contains a crash, a failed assertion, or an infinite loop, so the
-    harness itself never hangs."""
+    """Run `program` in an isolated subprocess; True iff it exits cleanly."""
     fd, path = tempfile.mkstemp(suffix=".py")
     try:
         with os.fdopen(fd, "w") as f:
@@ -177,8 +162,7 @@ def evaluate_humaneval(
     max_new_tokens: int = 256,
     timeout: float = 5.0,
 ) -> float:
-    """pass@1: greedily complete each prompt, then execute prompt + completion
-    + the task's check() in a sandbox. Score = fraction passing."""
+    """pass@1: greedily complete each prompt and run it against the task's check()."""
     model.eval()
     probs = [p if isinstance(p, HumanEvalProblem) else HumanEvalProblem(**p) for p in problems]
     if not probs:
@@ -195,8 +179,6 @@ def evaluate_humaneval(
             passed += 1
     return passed / len(probs)
 
-
-# --- 4. Orchestration + results.json + Markdown table ------------------------
 
 def evaluate(
     model: nn.Module,
@@ -273,8 +255,7 @@ def _fmt(key: str, value: float | None) -> str:
 
 
 def format_tables(checkpoints: dict[str, dict[str, float]]) -> str:
-    """Render the Markdown results table: rows are checkpoints in training
-    order, columns are metrics labelled with their chance baselines."""
+    """Render the Markdown results table: checkpoint rows, metric columns."""
     present = [m for m in _METRICS if any(m[0] in v for v in checkpoints.values())]
     headers = ["Checkpoint"] + [_header_label(k, lbl, lb) for k, lbl, lb in present]
 
@@ -286,8 +267,6 @@ def format_tables(checkpoints: dict[str, dict[str, float]]) -> str:
         lines.append("| " + " | ".join(cells) + " |")
     return "\n".join(lines) + "\n"
 
-
-# --- 5. Task sets: JSONL fixtures, built-in samples, or HuggingFace ----------
 
 # The built-in samples carry no signal; they exist so every metric can be run
 # end to end with zero downloads.
@@ -305,8 +284,7 @@ SAMPLE_HUMANEVAL = [
 
 
 def load_arc(subset: str, *, split: str = "test", limit: int | None = None) -> list[dict]:
-    """ARC from HuggingFace (allenai/ai2_arc; subset 'ARC-Easy' or
-    'ARC-Challenge') -> the internal question format. Downloads on first use."""
+    """ARC (allenai/ai2_arc, 'ARC-Easy' or 'ARC-Challenge') as questions."""
     ds = load_dataset("allenai/ai2_arc", subset, split=split)
     out = []
     for row in ds:
@@ -324,8 +302,7 @@ def load_arc(subset: str, *, split: str = "test", limit: int | None = None) -> l
 
 
 def load_mmlu(*, split: str = "test", limit: int | None = None) -> list[dict]:
-    """MMLU from HuggingFace (cais/mmlu, 'all') -> the internal question
-    format. Downloads on first use."""
+    """MMLU (cais/mmlu, 'all') as questions."""
     ds = load_dataset("cais/mmlu", "all", split=split)
     out = []
     for row in ds:
@@ -340,8 +317,7 @@ def load_mmlu(*, split: str = "test", limit: int | None = None) -> list[dict]:
 
 
 def load_humaneval(*, limit: int | None = None) -> list[dict]:
-    """HumanEval from HuggingFace (openai/openai_humaneval): rows already carry
-    prompt / test / entry_point. Downloads on first use."""
+    """HumanEval (openai/openai_humaneval); rows already carry the right keys."""
     ds = load_dataset("openai/openai_humaneval", split="test")
     out = []
     for row in ds:
@@ -358,8 +334,7 @@ def _load_jsonl(path: str) -> list[dict]:
 
 
 def _resolve_taskset(spec: str | None, metric: str, limit: int | None) -> list[dict] | None:
-    """Map a CLI flag value to a task set: None (skip) | 'sample' (built-in) |
-    'hf' (download the real dataset) | a JSONL path."""
+    """Map a CLI flag to a task set: None, 'sample', 'hf', or a JSONL path."""
     if spec is None:
         return None
     if spec == "sample":
@@ -374,8 +349,6 @@ def _resolve_taskset(spec: str | None, metric: str, limit: int | None) -> list[d
         return load_humaneval(limit=limit)
     return _load_jsonl(spec)
 
-
-# --- 6. CLI ------------------------------------------------------------------
 
 def main(argv: list[str] | None = None) -> int:
     taskset_help = "JSONL path, 'sample' (tiny built-in), or 'hf' (download the real set)"

@@ -1,31 +1,16 @@
-"""Fused Triton kernels with eager PyTorch references and automatic fallback.
-
-These accelerate the eager modules in model.py. Every operation comes in three
-layers:
-  1. an eager PyTorch reference -- the ground truth the tests compare against;
-  2. a Triton kernel in a torch.autograd.Function with a hand-derived backward;
-  3. a dispatcher picking the kernel on CUDA and the reference everywhere else,
-     so use_triton=True is safe on a CPU-only box.
-"""
+"""Fused Triton kernels with eager PyTorch references, dispatched by device."""
 
 from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
-
-try:  # Triton ships with the Linux torch wheel, but keep the import soft.
-    import triton
-    import triton.language as tl
-
-    HAS_TRITON = True
-except Exception:  # pragma: no cover - only on triton-less installs
-    HAS_TRITON = False
+import triton
+import triton.language as tl
 
 IGNORE_INDEX = -100
 DEFAULT_CHUNK = 8192
 
 __all__ = [
-    "HAS_TRITON",
     "rmsnorm",
     "rmsnorm_reference",
     "apply_rope",
@@ -36,96 +21,87 @@ __all__ = [
 ]
 
 
-# --- 1. RMSNorm: y = x * rsqrt(mean(x^2) + eps) * weight ---------------------
-
 def rmsnorm_reference(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    """Eager reference. x: [.., N], weight: [N] -> [.., N]. Reductions run in
-    float32 like the kernel, so bf16 inputs agree with it to tolerance."""
+    """Eager RMSNorm over the last dim, reducing in float32 like the kernel."""
     dtype = x.dtype
     xf = x.float()
     xf = xf * torch.rsqrt(xf.pow(2).mean(dim=-1, keepdim=True) + eps)
     return xf.to(dtype) * weight
 
 
-if HAS_TRITON:
+@triton.jit
+def _rmsnorm_fwd_kernel(X, W, Y, Rstd, stride, N, eps, BLOCK: tl.constexpr):
+    # One program per row: reduction, rsqrt, scale and gain in one pass.
+    row = tl.program_id(0)
+    cols = tl.arange(0, BLOCK)
+    mask = cols < N
 
-    @triton.jit
-    def _rmsnorm_fwd_kernel(X, W, Y, Rstd, stride, N, eps, BLOCK: tl.constexpr):
-        # One program per row: reduction, rsqrt, scale and gain in one pass.
-        row = tl.program_id(0)
-        cols = tl.arange(0, BLOCK)
-        mask = cols < N
+    x = tl.load(X + row * stride + cols, mask=mask, other=0.0).to(tl.float32)
+    w = tl.load(W + cols, mask=mask, other=0.0).to(tl.float32)
 
-        x = tl.load(X + row * stride + cols, mask=mask, other=0.0).to(tl.float32)
-        w = tl.load(W + cols, mask=mask, other=0.0).to(tl.float32)
+    var = tl.sum(x * x, axis=0) / N
+    rstd = 1.0 / tl.sqrt(var + eps)
+    tl.store(Rstd + row, rstd)  # saved for the backward pass
 
-        var = tl.sum(x * x, axis=0) / N
-        rstd = 1.0 / tl.sqrt(var + eps)
-        tl.store(Rstd + row, rstd)  # saved for the backward pass
+    tl.store(Y + row * stride + cols, x * rstd * w, mask=mask)
 
-        tl.store(Y + row * stride + cols, x * rstd * w, mask=mask)
 
-    @triton.jit
-    def _rmsnorm_bwd_dx_kernel(X, W, DY, Rstd, DX, stride, N, BLOCK: tl.constexpr):
-        # Analytic input gradient (r = rstd, g = dy * w, c = sum_j g_j x_j):
-        #   dx = r * (g - x * (r^2 * c / N))
-        row = tl.program_id(0)
-        cols = tl.arange(0, BLOCK)
-        mask = cols < N
+@triton.jit
+def _rmsnorm_bwd_dx_kernel(X, W, DY, Rstd, DX, stride, N, BLOCK: tl.constexpr):
+    # With r = rstd, g = dy * w and c = sum_j g_j x_j: dx = r * (g - x * r^2 * c / N).
+    row = tl.program_id(0)
+    cols = tl.arange(0, BLOCK)
+    mask = cols < N
 
-        x = tl.load(X + row * stride + cols, mask=mask, other=0.0).to(tl.float32)
-        dy = tl.load(DY + row * stride + cols, mask=mask, other=0.0).to(tl.float32)
-        w = tl.load(W + cols, mask=mask, other=0.0).to(tl.float32)
-        rstd = tl.load(Rstd + row)
+    x = tl.load(X + row * stride + cols, mask=mask, other=0.0).to(tl.float32)
+    dy = tl.load(DY + row * stride + cols, mask=mask, other=0.0).to(tl.float32)
+    w = tl.load(W + cols, mask=mask, other=0.0).to(tl.float32)
+    rstd = tl.load(Rstd + row)
 
-        g = dy * w
-        c = tl.sum(g * x, axis=0)
-        dx = rstd * (g - x * (rstd * rstd * c / N))
-        tl.store(DX + row * stride + cols, dx, mask=mask)
+    g = dy * w
+    c = tl.sum(g * x, axis=0)
+    dx = rstd * (g - x * (rstd * rstd * c / N))
+    tl.store(DX + row * stride + cols, dx, mask=mask)
 
-    class _RMSNormTriton(torch.autograd.Function):
-        @staticmethod
-        def forward(ctx, x, weight, eps):
-            shape = x.shape
-            N = shape[-1]
-            x2 = x.reshape(-1, N).contiguous()  # [M, N]: one kernel program per row
-            M = x2.shape[0]
 
-            y = torch.empty_like(x2)
-            rstd = torch.empty(M, device=x2.device, dtype=torch.float32)
-            BLOCK = triton.next_power_of_2(N)
-            _rmsnorm_fwd_kernel[(M,)](x2, weight, y, rstd, x2.stride(0), N, eps, BLOCK=BLOCK)
-            ctx.save_for_backward(x2, weight, rstd)
-            ctx.shape = shape
-            return y.reshape(shape)
+class _RMSNormTriton(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, weight, eps):
+        shape = x.shape
+        N = shape[-1]
+        x2 = x.reshape(-1, N).contiguous()  # [M, N]: one kernel program per row
+        M = x2.shape[0]
 
-        @staticmethod
-        def backward(ctx, dy):
-            x2, weight, rstd = ctx.saved_tensors
-            M, N = x2.shape
-            dy2 = dy.reshape(-1, N).contiguous()
+        y = torch.empty_like(x2)
+        rstd = torch.empty(M, device=x2.device, dtype=torch.float32)
+        BLOCK = triton.next_power_of_2(N)
+        _rmsnorm_fwd_kernel[(M,)](x2, weight, y, rstd, x2.stride(0), N, eps, BLOCK=BLOCK)
+        ctx.save_for_backward(x2, weight, rstd)
+        ctx.shape = shape
+        return y.reshape(shape)
 
-            dx = torch.empty_like(x2)
-            BLOCK = triton.next_power_of_2(N)
-            _rmsnorm_bwd_dx_kernel[(M,)](x2, weight, dy2, rstd, dx, x2.stride(0), N, BLOCK=BLOCK)
-            # Gain gradient: a cheap [N] reduction, left in torch fp32 so the
-            # kernel stays scoped to the memory-bound dx.
-            x_hat = x2.float() * rstd[:, None]
-            dweight = (dy2.float() * x_hat).sum(dim=0).to(weight.dtype)
-            return dx.reshape(ctx.shape), dweight, None
+    @staticmethod
+    def backward(ctx, dy):
+        x2, weight, rstd = ctx.saved_tensors
+        M, N = x2.shape
+        dy2 = dy.reshape(-1, N).contiguous()
+
+        dx = torch.empty_like(x2)
+        BLOCK = triton.next_power_of_2(N)
+        _rmsnorm_bwd_dx_kernel[(M,)](x2, weight, dy2, rstd, dx, x2.stride(0), N, BLOCK=BLOCK)
+        # The gain gradient is a cheap [N] reduction, left in torch fp32 so the
+        # kernel stays scoped to the memory-bound dx.
+        x_hat = x2.float() * rstd[:, None]
+        dweight = (dy2.float() * x_hat).sum(dim=0).to(weight.dtype)
+        return dx.reshape(ctx.shape), dweight, None
 
 
 def rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    """RMSNorm over the last dim. Triton kernel on CUDA, eager reference
-    elsewhere; both paths compute the same value."""
-    if HAS_TRITON and x.is_cuda:
+    """RMSNorm over the last dim: Triton kernel on CUDA, eager reference elsewhere."""
+    if x.is_cuda:
         return _RMSNormTriton.apply(x, weight, eps)
     return rmsnorm_reference(x, weight, eps)
 
-
-# --- 2. RoPE: y = x * cos + rotate_half(x) * sin, per position ---------------
-# The rotation is orthogonal, so the backward is the same op with sin negated
-# and one kernel serves both directions. cos/sin are constants: no gradient.
 
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
     x1, x2 = x.chunk(2, dim=-1)
@@ -133,132 +109,120 @@ def _rotate_half(x: torch.Tensor) -> torch.Tensor:
 
 
 def rope_reference(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-    """Eager reference. x: [B, H, T, d]; cos/sin: [T, d] broadcast over B, H."""
+    """Eager RoPE. x: [B, H, T, d]; cos/sin: [T, d] broadcast over B, H."""
     return x * cos[None, None, :, :] + _rotate_half(x) * sin[None, None, :, :]
 
 
-if HAS_TRITON:
+@triton.jit
+def _rope_kernel(X, COS, SIN, O, T, D, HALF, BLOCK: tl.constexpr):
+    # One program per (B*H*T) row. cos/sin stay [T, d]: no expanded copies.
+    row = tl.program_id(0)
+    pos = row % T  # position index into cos/sin (contiguous [.., T, D] layout)
 
-    @triton.jit
-    def _rope_kernel(X, COS, SIN, O, T, D, HALF, BLOCK: tl.constexpr):
-        # One program per (B*H*T) row. cos/sin stay [T, d]: no expanded copies.
-        row = tl.program_id(0)
-        pos = row % T  # position index into cos/sin (contiguous [.., T, D] layout)
+    cols = tl.arange(0, BLOCK)
+    mask = cols < D
 
-        cols = tl.arange(0, BLOCK)
-        mask = cols < D
+    x = tl.load(X + row * D + cols, mask=mask, other=0.0).to(tl.float32)
+    cos = tl.load(COS + pos * D + cols, mask=mask, other=0.0).to(tl.float32)
+    sin = tl.load(SIN + pos * D + cols, mask=mask, other=0.0).to(tl.float32)
 
-        x = tl.load(X + row * D + cols, mask=mask, other=0.0).to(tl.float32)
-        cos = tl.load(COS + pos * D + cols, mask=mask, other=0.0).to(tl.float32)
-        sin = tl.load(SIN + pos * D + cols, mask=mask, other=0.0).to(tl.float32)
+    # rotate_half via a shifted load: each column reads its partner channel,
+    # negated in the first half.
+    shifted = tl.where(cols < HALF, cols + HALF, cols - HALF)
+    x_rot = tl.load(X + row * D + shifted, mask=mask, other=0.0).to(tl.float32)
+    sign = tl.where(cols < HALF, -1.0, 1.0)
 
-        # rotate_half via a shifted load: each column reads its partner channel,
-        # negated in the first half.
-        shifted = tl.where(cols < HALF, cols + HALF, cols - HALF)
-        x_rot = tl.load(X + row * D + shifted, mask=mask, other=0.0).to(tl.float32)
-        sign = tl.where(cols < HALF, -1.0, 1.0)
+    tl.store(O + row * D + cols, x * cos + sign * x_rot * sin, mask=mask)
 
-        tl.store(O + row * D + cols, x * cos + sign * x_rot * sin, mask=mask)
 
-    def _rope_apply_triton(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-        b, h, t, d = x.shape
-        xc = x.contiguous()
-        out = torch.empty_like(xc)
-        BLOCK = triton.next_power_of_2(d)
-        _rope_kernel[(b * h * t,)](
-            xc, cos.contiguous(), sin.contiguous(), out, t, d, d // 2, BLOCK=BLOCK
-        )
-        return out
+def _rope_apply_triton(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    b, h, t, d = x.shape
+    xc = x.contiguous()
+    out = torch.empty_like(xc)
+    BLOCK = triton.next_power_of_2(d)
+    _rope_kernel[(b * h * t,)](
+        xc, cos.contiguous(), sin.contiguous(), out, t, d, d // 2, BLOCK=BLOCK
+    )
+    return out
 
-    class _RoPETriton(torch.autograd.Function):
-        @staticmethod
-        def forward(ctx, x, cos, sin):
-            ctx.save_for_backward(cos, sin)
-            return _rope_apply_triton(x, cos, sin)
 
-        @staticmethod
-        def backward(ctx, grad_out):
-            cos, sin = ctx.saved_tensors
-            # Inverse rotation = same kernel with -sin.
-            return _rope_apply_triton(grad_out.contiguous(), cos, -sin), None, None
+class _RoPETriton(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, cos, sin):
+        ctx.save_for_backward(cos, sin)
+        return _rope_apply_triton(x, cos, sin)
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        cos, sin = ctx.saved_tensors
+        # The rotation is orthogonal, so the inverse is the same kernel with -sin.
+        return _rope_apply_triton(grad_out.contiguous(), cos, -sin), None, None
 
 
 def apply_rope(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-    """Apply RoPE to x: [B, H, T, d]. Triton on CUDA, eager elsewhere."""
-    if HAS_TRITON and x.is_cuda:
+    """Apply RoPE to x [B, H, T, d]: Triton on CUDA, eager elsewhere."""
+    if x.is_cuda:
         return _RoPETriton.apply(x, cos, sin)
     return rope_reference(x, cos, sin)
 
 
-# --- 3. SwiGLU gating: h = SiLU(a) * b, elementwise --------------------------
-# Fusing writes back only h, never the SiLU(a) intermediate; the surrounding
-# gate/up/down matmuls stay cuBLAS GEMMs. Backward, with s = sigmoid(a):
-#   da = dh * b * (s * (1 + a * (1 - s)))   db = dh * (a * s)
-
 def swiglu_reference(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    """Eager reference: SiLU(a) * b, any matching shapes."""
+    """Eager SwiGLU gating: SiLU(a) * b, any matching shapes."""
     return F.silu(a) * b
 
 
-if HAS_TRITON:
+@triton.jit
+def _swiglu_fwd_kernel(A, B, H, n, BLOCK: tl.constexpr):
+    off = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = off < n
+    a = tl.load(A + off, mask=mask, other=0.0).to(tl.float32)
+    b = tl.load(B + off, mask=mask, other=0.0).to(tl.float32)
+    s = 1.0 / (1.0 + tl.exp(-a))
+    tl.store(H + off, (a * s) * b, mask=mask)
 
-    @triton.jit
-    def _swiglu_fwd_kernel(A, B, H, n, BLOCK: tl.constexpr):
-        off = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-        mask = off < n
-        a = tl.load(A + off, mask=mask, other=0.0).to(tl.float32)
-        b = tl.load(B + off, mask=mask, other=0.0).to(tl.float32)
-        s = 1.0 / (1.0 + tl.exp(-a))
-        tl.store(H + off, (a * s) * b, mask=mask)
 
-    @triton.jit
-    def _swiglu_bwd_kernel(A, B, DH, DA, DB, n, BLOCK: tl.constexpr):
-        off = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-        mask = off < n
-        a = tl.load(A + off, mask=mask, other=0.0).to(tl.float32)
-        b = tl.load(B + off, mask=mask, other=0.0).to(tl.float32)
-        dh = tl.load(DH + off, mask=mask, other=0.0).to(tl.float32)
-        s = 1.0 / (1.0 + tl.exp(-a))
-        silu = a * s
-        dsilu = s * (1.0 + a * (1.0 - s))
-        tl.store(DA + off, dh * b * dsilu, mask=mask)
-        tl.store(DB + off, dh * silu, mask=mask)
+@triton.jit
+def _swiglu_bwd_kernel(A, B, DH, DA, DB, n, BLOCK: tl.constexpr):
+    off = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = off < n
+    a = tl.load(A + off, mask=mask, other=0.0).to(tl.float32)
+    b = tl.load(B + off, mask=mask, other=0.0).to(tl.float32)
+    dh = tl.load(DH + off, mask=mask, other=0.0).to(tl.float32)
+    s = 1.0 / (1.0 + tl.exp(-a))
+    silu = a * s
+    dsilu = s * (1.0 + a * (1.0 - s))
+    tl.store(DA + off, dh * b * dsilu, mask=mask)
+    tl.store(DB + off, dh * silu, mask=mask)
 
-    class _SwiGLUTriton(torch.autograd.Function):
-        @staticmethod
-        def forward(ctx, a, b):
-            a = a.contiguous()
-            b = b.contiguous()
-            h = torch.empty_like(a)
-            n = a.numel()
-            _swiglu_fwd_kernel[(triton.cdiv(n, 1024),)](a, b, h, n, BLOCK=1024)
-            ctx.save_for_backward(a, b)
-            return h
 
-        @staticmethod
-        def backward(ctx, dh):
-            a, b = ctx.saved_tensors
-            dh = dh.contiguous()
-            da = torch.empty_like(a)
-            db = torch.empty_like(b)
-            n = a.numel()
-            _swiglu_bwd_kernel[(triton.cdiv(n, 1024),)](a, b, dh, da, db, n, BLOCK=1024)
-            return da, db
+class _SwiGLUTriton(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, a, b):
+        a = a.contiguous()
+        b = b.contiguous()
+        h = torch.empty_like(a)
+        n = a.numel()
+        _swiglu_fwd_kernel[(triton.cdiv(n, 1024),)](a, b, h, n, BLOCK=1024)
+        ctx.save_for_backward(a, b)
+        return h
+
+    @staticmethod
+    def backward(ctx, dh):
+        a, b = ctx.saved_tensors
+        dh = dh.contiguous()
+        da = torch.empty_like(a)
+        db = torch.empty_like(b)
+        n = a.numel()
+        _swiglu_bwd_kernel[(triton.cdiv(n, 1024),)](a, b, dh, da, db, n, BLOCK=1024)
+        return da, db
 
 
 def swiglu(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    """Fused SiLU(a) * b gating. Triton on CUDA, eager elsewhere."""
-    if HAS_TRITON and a.is_cuda:
+    """Fused SiLU(a) * b gating: Triton on CUDA, eager elsewhere."""
+    if a.is_cuda:
         return _SwiGLUTriton.apply(a, b)
     return swiglu_reference(a, b)
 
-
-# --- 4. Chunked cross-entropy ------------------------------------------------
-# F.cross_entropy first materializes [B*T, V] logits, which at V = 32,768
-# dominates peak memory. Streaming the vocabulary with an online softmax (a
-# running max and sum-of-exponentials, as FlashAttention does) makes that
-# O(B*T*chunk). Pure PyTorch, not Triton: the per-chunk work is already GEMMs
-# and reductions, so the win is memory, not a faster kernel.
 
 def _chunks(total: int, chunk: int):
     for start in range(0, total, chunk):
@@ -276,9 +240,7 @@ def _compute_dtype(dtype: torch.dtype) -> torch.dtype:
 class _ChunkedCrossEntropy(torch.autograd.Function):
     @staticmethod
     def forward(ctx, hidden, weight, targets, ignore_index, chunk):
-        # Autocast off so the explicit float32 upcast is honored: otherwise it
-        # re-downcasts the matmuls and the fp32 softmax buffers collide with
-        # bf16 logits.
+        # Autocast off so the explicit float32 upcast is not re-downcast.
         with torch.autocast(device_type=hidden.device.type, enabled=False):
             N, _ = hidden.shape
             V = weight.shape[0]
@@ -352,17 +314,10 @@ def chunked_cross_entropy(
     ignore_index: int = IGNORE_INDEX,
     chunk: int = DEFAULT_CHUNK,
 ) -> torch.Tensor:
-    """Mean cross-entropy of `hidden @ weight.T` against `targets`, streaming
-    the vocabulary so the full [N, V] logits tensor is never materialized.
+    """Mean cross-entropy of hidden @ weight.T, streaming the vocabulary in tiles.
 
-    Exact to floating-point tolerance, for any chunk size, against
-        F.cross_entropy(hidden @ weight.T, targets, ignore_index=ignore_index)
-
-    Args:
-        hidden:  [N, D] activations (e.g. flattened [B*T, D]).
-        weight:  [V, D] output projection (the tied embedding weight).
-        targets: [N] int64 class indices; ignore_index positions are dropped.
-        chunk:   vocabulary tile size; smaller trades compute for less memory.
+    Equals F.cross_entropy on the full logits to floating-point tolerance for
+    any chunk size, without ever materializing the [N, V] logits tensor.
     """
     if hidden.dim() != 2:
         hidden = hidden.reshape(-1, hidden.shape[-1])

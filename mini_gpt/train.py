@@ -1,8 +1,4 @@
-"""Pretraining: AdamW + Muon, the LR schedule, the loop, and checkpoints.
-
-Everything between "I have a model and data" and "I have a checkpoint", over
-data.ShardSampler windows and a model.MiniGPT.
-"""
+"""Pretraining: AdamW + Muon, the LR schedule, the loop, and checkpoints."""
 
 from __future__ import annotations
 
@@ -22,15 +18,11 @@ from mini_gpt.config import Config, get_config
 from mini_gpt.data import ShardSampler
 from mini_gpt.model import MiniGPT
 
-_DTYPES = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}
+DTYPES = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}
 
-
-# --- 1. Determinism ----------------------------------------------------------
 
 def seed_everything(seed: int = 0, *, deterministic: bool = True) -> int:
-    """Seed Python, NumPy, and Torch (CPU + CUDA); optionally switch Torch to
-    deterministic algorithms. Reproducibility is what makes the differential
-    kernel tests and the checkpoint-continuation test meaningful."""
+    """Seed Python, NumPy and Torch, optionally forcing deterministic algorithms."""
     os.environ["PYTHONHASHSEED"] = str(seed)
     random.seed(seed)
     np.random.seed(seed)
@@ -48,15 +40,10 @@ def seed_everything(seed: int = 0, *, deterministic: bool = True) -> int:
     return seed
 
 
-# --- 2. Parameter grouping and the two optimizers ----------------------------
-
 def classify_parameters(model: nn.Module) -> dict[str, list[nn.Parameter]]:
-    """Partition by shape, deduplicated by identity so the tied embedding
-    weight is assigned exactly once.
+    """Split parameters into Muon-eligible 2D matrices ("hidden") and the rest.
 
-    hidden -- 2D matrices (attention and MLP projections): weight decay, and
-              the group Muon updates.
-    misc   -- embeddings, RMSNorm gains, any 1D parameter: no decay, AdamW.
+    Deduplicated by identity, so the tied embedding weight is assigned once.
     """
     groups: dict[str, list[nn.Parameter]] = {"hidden": [], "misc": []}
     seen: set[int] = set()
@@ -73,16 +60,9 @@ def classify_parameters(model: nn.Module) -> dict[str, list[nn.Parameter]]:
 
 
 def zeropower_via_newtonschulz5(grad: torch.Tensor, steps: int = 5, eps: float = 1e-7) -> torch.Tensor:
-    """Orthogonalize a 2D matrix with a quintic Newton-Schulz iteration.
-
-    Pushes singular values toward 1 with matmuls only (no SVD); the quintic
-    coefficients are Keller Jordan's tuned constants, and five steps land a
-    well-conditioned matrix in roughly [0.7, 1.13]. Muon applies this to the
-    momentum buffer, so the update direction has a uniform spectrum however
-    skewed the raw gradient is.
-    """
+    """Orthogonalize a 2D matrix with a quintic Newton-Schulz iteration."""
     assert grad.ndim == 2, "Newton-Schulz expects a 2D matrix"
-    a, b, c = 3.4445, -4.7750, 2.0315
+    a, b, c = 3.4445, -4.7750, 2.0315  # Keller Jordan's tuned quintic constants
     x = grad.float()
     transpose = x.size(0) > x.size(1)  # operate on the smaller dimension
     if transpose:
@@ -98,12 +78,7 @@ def zeropower_via_newtonschulz5(grad: torch.Tensor, steps: int = 5, eps: float =
 
 
 class Muon(torch.optim.Optimizer):
-    """Muon: SGD-momentum whose update is orthogonalized by Newton-Schulz.
-
-    For each 2D weight: accumulate momentum, orthogonalize it, then step with a
-    shape-dependent scale sqrt(max(1, rows/cols)) that keeps the update RMS
-    comparable across matrix aspect ratios.
-    """
+    """SGD-momentum whose update is orthogonalized by Newton-Schulz."""
 
     def __init__(
         self,
@@ -140,6 +115,7 @@ class Muon(torch.optim.Optimizer):
                     p.mul_(1 - lr * group["weight_decay"])
                 if update.ndim == 2:
                     ortho = zeropower_via_newtonschulz5(update, steps=group["ns_steps"]).type_as(p)
+                    # Keeps the update RMS comparable across matrix aspect ratios.
                     scale = max(1.0, p.size(0) / p.size(1)) ** 0.5
                     p.add_(ortho, alpha=-lr * scale)
                 else:  # fallback for any non-matrix param routed here
@@ -148,11 +124,7 @@ class Muon(torch.optim.Optimizer):
 
 
 def build_optimizers(model: nn.Module, cfg: Config) -> list[torch.optim.Optimizer]:
-    """The optimizer set for a run, as a plain list.
-
-    cfg.use_muon True  -> [Muon(hidden), AdamW(misc)]
-    cfg.use_muon False -> [AdamW(hidden + misc)]  (the pure-AdamW baseline)
-    """
+    """[Muon(hidden), AdamW(misc)], or a single AdamW when cfg.use_muon is off."""
     groups = classify_parameters(model)
     adamw = torch.optim.AdamW(
         [{"params": groups["misc"], "weight_decay": 0.0, "lr": cfg.lr_adamw, "name": "misc"}],
@@ -174,11 +146,8 @@ def build_optimizers(model: nn.Module, cfg: Config) -> list[torch.optim.Optimize
     return [muon, adamw]
 
 
-# --- 3. LR schedule: linear warmup, then cosine decay to a floor -------------
-# One multiplier scales every group's base LR, so the distinct AdamW and Muon
-# peaks keep their ratio across the whole schedule.
-
 def lr_multiplier(step: int, warmup: int, max_steps: int, floor_frac: float) -> float:
+    """Linear warmup, then cosine decay to floor_frac of the peak."""
     if warmup > 0 and step < warmup:
         return (step + 1) / warmup
     if step >= max_steps:
@@ -189,7 +158,11 @@ def lr_multiplier(step: int, warmup: int, max_steps: int, floor_frac: float) -> 
 
 
 class WarmupCosine:
-    """Warmup-then-cosine schedule over a list of optimizers."""
+    """Warmup-then-cosine schedule over a list of optimizers.
+
+    One multiplier scales every group's base LR, so the distinct AdamW and Muon
+    peaks keep their ratio across the whole schedule.
+    """
 
     def __init__(self, optimizers: list[torch.optim.Optimizer], warmup: int,
                  max_steps: int, floor_frac: float):
@@ -223,15 +196,8 @@ class WarmupCosine:
         self._apply()
 
 
-def build_scheduler(optimizers: list[torch.optim.Optimizer], cfg: Config) -> WarmupCosine:
-    return WarmupCosine(optimizers, cfg.warmup_steps, cfg.max_steps, cfg.lr_floor_frac)
-
-
-# --- 4. Data stream: sampled windows -> (inputs, targets) batches ------------
-
 class DataStream:
-    """Turns sampled [B, context+1] windows into next-token training pairs:
-    x = window[:, :-1], y = window[:, 1:] -- y is x shifted left by one."""
+    """Turns sampled [B, context+1] windows into (inputs, next-token targets)."""
 
     def __init__(self, sampler: ShardSampler, batch_size: int,
                  device: torch.device | str = "cpu"):
@@ -259,17 +225,9 @@ def autocast_ctx(device: torch.device, dtype: torch.dtype):
 
 
 def maybe_compile(model: nn.Module, cfg: Config) -> nn.Module:
-    """torch.compile when cfg.compile, else the model unchanged. Compilation is
-    lazy (first forward), so a backend failure surfaces at call time."""
-    if getattr(cfg, "compile", False):
-        return torch.compile(model)
-    return model
+    """torch.compile when cfg.compile, else the model unchanged."""
+    return torch.compile(model) if cfg.compile else model
 
-
-# --- 5. Checkpointing --------------------------------------------------------
-# Weights, every optimizer's state, the scheduler, the sampler position, the
-# step counter, and host RNG: enough to pick a killed run back up on the
-# same data stream.
 
 def save_checkpoint(
     path: str | Path,
@@ -281,6 +239,7 @@ def save_checkpoint(
     sampler_state: dict | None = None,
     extra: dict[str, Any] | None = None,
 ) -> None:
+    """Save weights, optimizer/scheduler/sampler state and host RNG."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -319,19 +278,15 @@ def load_checkpoint(
 
 
 def load_model_weights(model: nn.Module, path: str | Path, device: str = "cpu") -> None:
-    """Load just the weights from a train.py checkpoint (or a bare state dict).
-    Used by generate.py / posttrain.py / evaluate.py."""
+    """Load just the weights from a checkpoint (or a bare state dict)."""
     payload = torch.load(str(path), map_location=device, weights_only=False)
     state = payload["model"] if isinstance(payload, dict) and "model" in payload else payload
     model.load_state_dict(state)
 
 
-# --- 6. Validation loss and perplexity ---------------------------------------
-
 @torch.no_grad()
 def estimate_val_loss(model: nn.Module, val_data: DataStream, iters: int = 20) -> float:
-    """Mean next-token cross-entropy over `iters` held-out batches. Perplexity
-    is exp(this): the effective branching factor of the model's predictions."""
+    """Mean next-token cross-entropy over `iters` held-out batches."""
     model.eval()
     total = 0.0
     for _ in range(iters):
@@ -341,8 +296,6 @@ def estimate_val_loss(model: nn.Module, val_data: DataStream, iters: int = 20) -
     model.train()
     return total / iters
 
-
-# --- 7. The training loop, traceable top to bottom ---------------------------
 
 def train(
     cfg: Config,
@@ -358,12 +311,10 @@ def train(
     eval_iters: int = 20,
 ) -> list[float]:
     """Pretrain MiniGPT on packed shards; returns the per-step loss history."""
-    # --- seeding ---
     seed_everything(cfg.seed)
     max_steps = steps if steps is not None else cfg.max_steps
     out = Path(out_dir)
 
-    # --- dataset ---
     train_data = DataStream(
         ShardSampler(data_dir, context=cfg.context, split="train", seed=cfg.seed),
         cfg.micro_batch,
@@ -379,20 +330,16 @@ def train(
     except ValueError:
         pass  # tiny corpus with no val shard
 
-    # --- model ---
     raw_model = MiniGPT(cfg).to(device)
-    # Chunked cross-entropy whenever the kernels are on.
-    raw_model.fused_loss = getattr(cfg, "use_triton", False)
+    raw_model.fused_loss = cfg.use_triton
     model = maybe_compile(raw_model, cfg)  # raw_model keeps clean state_dict keys
 
-    # --- optimizers + schedule ---
     # The schedule always spans cfg.max_steps; `steps` only bounds this run, so
     # an interrupted run and its continuation share one LR trajectory.
     optimizers = build_optimizers(raw_model, cfg)
     scheduler = WarmupCosine(optimizers, cfg.warmup_steps, cfg.max_steps, cfg.lr_floor_frac)
-    amp_dtype = _DTYPES.get(cfg.dtype, torch.float32)
+    amp_dtype = DTYPES.get(cfg.dtype, torch.float32)
 
-    # --- continue from a checkpoint ---
     step = 0
     if resume:
         payload = load_checkpoint(resume, model=raw_model, optimizers=optimizers,
@@ -402,7 +349,6 @@ def train(
             train_data.load_state_dict(payload["sampler"])
         print(f"resumed from {resume} at step {step}")
 
-    # --- the loop ---
     losses: list[float] = []
     while step < max_steps:
         model.train()
@@ -413,7 +359,7 @@ def train(
         # independent of what fits in memory at once.
         total = 0.0
         for _ in range(cfg.grad_accum):
-            x, y = train_data.batch()                    # [B, T]
+            x, y = train_data.batch()  # [B, T]
             with autocast_ctx(torch.device(device), amp_dtype):
                 _, loss = model(x, y)
             (loss / cfg.grad_accum).backward()
@@ -421,7 +367,7 @@ def train(
 
         if cfg.grad_clip:
             nn.utils.clip_grad_norm_(raw_model.parameters(), cfg.grad_clip)
-        for opt in optimizers:                            # Muon then AdamW
+        for opt in optimizers:  # Muon then AdamW
             opt.step()
         scheduler.step()
         step += 1
@@ -449,8 +395,6 @@ def train(
     print(f"done: {step} steps -> {out}")
     return losses
 
-
-# --- 8. CLI ------------------------------------------------------------------
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Pretrain Mini-GPT on packed shards.")

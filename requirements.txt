@@ -1,15 +1,8 @@
-# Versions pinned to the toolchain the project was developed against; a newer
-# minor of torch/triton usually works, but the differential kernel tests are
-# only validated against these.
-
 torch==2.11.0            # model, autograd, bf16 autocast, torch.compile
 triton==3.6.0            # fused kernels; ships with the torch wheel on Linux
 numpy==2.4.2             # uint16 shard packing, host-side math
-tokenizers==0.22.2       # Rust BPE trainer; not used at train time
+tokenizers==0.22.2       # Rust BPE trainer
 datasets==4.0.0          # ClimbMix / GSM8K / ARC / MMLU / HumanEval downloads
 huggingface-hub==0.35.0  # dataset download backing datasets/tokenizers
+tiktoken==0.12.0         # GPT-2 detokenizing for the --source hf-tokens data path
 pytest==9.0.3            # test suite
-
-# Optional: only the `--source hf-tokens` data path (GPT-2-detokenizing
-# NVIDIA's official ClimbMix token release) needs it.
-# tiktoken

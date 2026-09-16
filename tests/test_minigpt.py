@@ -1,11 +1,4 @@
-"""The Mini-GPT test suite: one file, ordered like the package.
-
-Every component's guarantees as executable assertions -- exact tokenizer
-round-trips, causal attention, kernels matching their eager references forward
-and backward, both optimizers learning, a restarted run reproducing an
-uninterrupted one, GRPO pushing log-probs the right way, and the evaluators
-scoring what they claim to. CUDA-only tests skip cleanly without a GPU.
-"""
+"""The Mini-GPT test suite: one file, ordered like the package."""
 
 from __future__ import annotations
 
@@ -50,10 +43,7 @@ from mini_gpt.train import (
     zeropower_via_newtonschulz5,
 )
 
-needs_cuda_triton = pytest.mark.skipif(
-    not (torch.cuda.is_available() and kernels.HAS_TRITON),
-    reason="requires CUDA and Triton",
-)
+needs_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 
 
 def tiny_config(**overrides) -> Config:
@@ -67,7 +57,7 @@ def tiny_config(**overrides) -> Config:
     return Config(**base)
 
 
-# --- fixtures ----------------------------------------------------------------
+# fixtures
 
 @pytest.fixture(scope="session")
 def tok() -> MiniTokenizer:
@@ -86,7 +76,7 @@ def packed(tok, tmp_path_factory):
     return out
 
 
-# --- Tokenizer ---------------------------------------------------------------
+# Tokenizer
 
 def test_default_vocab_is_32k_and_uint16_safe():
     assert DEFAULT_VOCAB_SIZE == 32_768
@@ -146,7 +136,7 @@ def test_loading_tokenizer_without_specials_raises(tmp_path):
         MiniTokenizer.load(path)
 
 
-# --- Data (packing + sampling behaviors the training pipeline relies on) -----
+# Data (packing + sampling behaviors the training pipeline relies on)
 
 def test_pack_is_lossless_and_fingerprinted(tok, tmp_path):
     docs = ["alpha beta", "gamma delta epsilon"]
@@ -180,7 +170,7 @@ def test_train_and_val_splits_are_disjoint(packed):
     assert train_names and val_names and not (train_names & val_names)
 
 
-# --- Model -------------------------------------------------------------------
+# Model
 
 def test_forward_shapes_and_finite_loss():
     cfg = tiny_config()
@@ -337,7 +327,7 @@ def test_loss_mask_excludes_positions():
     assert torch.allclose(masked_loss, -picked.mean(), atol=1e-5)
 
 
-# --- Training ----------------------------------------------------------------
+# Training
 
 def test_forward_backward_gradients_are_finite():
     cfg = tiny_config()
@@ -479,7 +469,7 @@ def test_checkpoint_saves_and_loads_all_state(tmp_path):
         assert torch.equal(a, b), n
 
 
-# --- Triton kernels: eager references on CPU, differential comparisons on CUDA 
+# Triton kernels: eager references on CPU, differential comparisons on CUDA
 
 @pytest.mark.parametrize("chunk", [1, 7, 64, 100_000])
 def test_chunked_ce_matches_cross_entropy_any_chunk(chunk):
@@ -514,8 +504,7 @@ def test_chunked_ce_all_ignored_is_finite():
 
 
 def test_kernels_fall_back_to_eager_on_cpu():
-    # On CPU tensors the public dispatchers must run (via the references),
-    # whether or not Triton is importable.
+    # On CPU tensors the public dispatchers run via the eager references.
     x = torch.randn(3, 8)
     w = torch.ones(8)
     assert torch.allclose(kernels.rmsnorm(x, w), kernels.rmsnorm_reference(x, w), atol=1e-6)
@@ -542,7 +531,7 @@ def _compare_fwd_bwd(fn_kernel, fn_ref, inputs, atol):
             assert torch.allclose(tk.grad, tr.grad, atol=atol), "gradient mismatch"
 
 
-@needs_cuda_triton
+@needs_cuda
 @pytest.mark.parametrize("shape", [(4, 64), (2, 8, 64), (2, 4, 8, 16)])
 def test_triton_rmsnorm_matches_reference_on_cuda(shape):
     seed_everything(0)
@@ -555,7 +544,7 @@ def test_triton_rmsnorm_matches_reference_on_cuda(shape):
     )
 
 
-@needs_cuda_triton
+@needs_cuda
 def test_triton_rmsnorm_bf16_forward_tolerance():
     seed_everything(0)
     x = torch.randn(4, 64, device="cuda", dtype=torch.bfloat16)
@@ -567,7 +556,7 @@ def test_triton_rmsnorm_bf16_forward_tolerance():
     assert torch.allclose(y_k.float(), y_r.float(), atol=2e-2, rtol=3e-2)
 
 
-@needs_cuda_triton
+@needs_cuda
 def test_triton_rope_matches_reference_on_cuda():
     seed_everything(0)
     cos, sin = precompute_rope(16, 8, device="cuda")
@@ -579,7 +568,7 @@ def test_triton_rope_matches_reference_on_cuda():
     )
 
 
-@needs_cuda_triton
+@needs_cuda
 def test_triton_swiglu_matches_reference_on_cuda():
     seed_everything(0)
     a = torch.randn(4, 128, device="cuda", requires_grad=True)
@@ -587,7 +576,7 @@ def test_triton_swiglu_matches_reference_on_cuda():
     _compare_fwd_bwd(kernels.swiglu, kernels.swiglu_reference, [a, b], atol=1e-4)
 
 
-@needs_cuda_triton
+@needs_cuda
 def test_chunked_ce_peak_memory_scales_with_chunk():
     # The guaranteed property: peak memory follows the chunk size because the
     # full [N, V] logits tensor is never built.
@@ -609,7 +598,7 @@ def test_chunked_ce_peak_memory_scales_with_chunk():
     assert small < big  # smaller vocabulary tiles -> strictly lower peak memory
 
 
-@needs_cuda_triton
+@needs_cuda
 def test_full_model_matches_eager_with_kernels_on_cuda():
     x = torch.randint(0, 256, (2, 16), device="cuda")
     outs = {}
@@ -622,7 +611,7 @@ def test_full_model_matches_eager_with_kernels_on_cuda():
     assert torch.allclose(outs[False][1], outs[True][1], atol=1e-4)
 
 
-# --- Generation --------------------------------------------------------------
+# Generation
 
 def test_generation_is_deterministic_and_seeded(tok):
     cfg = tiny_config(vocab_size=512)
@@ -677,7 +666,7 @@ def test_generation_stops_on_eos(tok):
     assert out.shape[1] == 4 and out[0, -1].item() == tok.eos_id  # stopped immediately
 
 
-# --- Post-training: chat template, SFT, rewards, GRPO ------------------------
+# Post-training: chat template, SFT, rewards, GRPO
 
 def test_loss_mask_covers_only_assistant_tokens(tok):
     conv = [
@@ -850,7 +839,7 @@ def test_grpo_smoke_loop_runs_and_logs_mean_reward(tok):
     assert len(rewards) == 2 and all(math.isfinite(r) for r in rewards)
 
 
-# --- Evaluation --------------------------------------------------------------
+# Evaluation
 
 class _PreferTokens(nn.Module):
     """A stub LM that assigns high logits to a fixed token set everywhere."""
