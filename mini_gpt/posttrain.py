@@ -1,10 +1,4 @@
-"""Post-training: the chat template, supervised fine-tuning, and GRPO.
-
-Two stages turn a next-token model into an assistant -- SFT (assistant-only
-loss over packed conversations), then GRPO (group-relative rewards, no learned
-critic) on GSM8K or offline arithmetic. Built on tokenizer.py's role tokens,
-generate.py's sampling, and train.py's optimizers and checkpoints.
-"""
+"""Post-training: the chat template, supervised fine-tuning, and GRPO."""
 
 from __future__ import annotations
 
@@ -25,6 +19,7 @@ from mini_gpt.generate import generate
 from mini_gpt.model import MiniGPT
 from mini_gpt.tokenizer import MiniTokenizer
 from mini_gpt.train import (
+    DTYPES,
     WarmupCosine,
     autocast_ctx,
     build_optimizers,
@@ -33,15 +28,10 @@ from mini_gpt.train import (
     seed_everything,
 )
 
-_DTYPES = {"bfloat16": torch.bfloat16, "float16": torch.float16, "float32": torch.float32}
-
-
-# --- 1. Chat message representation ------------------------------------------
-
 Role = Literal["system", "user", "assistant", "tool"]
 
-# The token opening each role's turn. A "tool" message carries a tool result;
-# an assistant's tool call is inline <|tool_call|> content in its own turn.
+# A "tool" message carries a tool result; an assistant's tool call is inline
+# <|tool_call|> content in its own turn.
 ROLE_TOKEN: dict[str, str] = {
     "system": "<|system|>",
     "user": "<|user|>",
@@ -60,12 +50,6 @@ def _coerce(messages: Sequence[Message | dict]) -> list[Message]:
     return [m if isinstance(m, Message) else Message(m["role"], m["content"]) for m in messages]
 
 
-# --- 2. Conversation rendering + 3. assistant-only loss mask -----------------
-# One function maps messages to token IDs, so the SFT loss mask and the
-# GRPO/inference prompt format cannot drift apart. Layout, after a leading
-# <|bos|>: `<|role|> <content> <|eos|>` per turn. The mask covers an assistant
-# turn's content and closing <|eos|> -- never the role header, which is prompt.
-
 @dataclass
 class RenderedChat:
     ids: list[int]        # token IDs, len L
@@ -81,10 +65,11 @@ def render_chat(
     *,
     add_generation_prompt: bool = False,
 ) -> RenderedChat:
-    """Render a conversation to token IDs plus the assistant-only loss mask.
+    """Render a conversation to `<|bos|> (<|role|> content <|eos|>)*` plus its loss mask.
 
-    add_generation_prompt appends a content-free trailing <|assistant|> header
-    (not part of the loss) to prime a reply, for inference and GRPO rollouts.
+    The mask covers an assistant turn's content and closing <|eos|>, never the
+    role header. add_generation_prompt appends a content-free trailing
+    <|assistant|> header to prime a reply, for inference and GRPO rollouts.
     """
     msgs = _coerce(messages)
 
@@ -97,7 +82,7 @@ def render_chat(
         role_id = tokenizer.token_to_id(ROLE_TOKEN[msg.role])
         assert role_id is not None
 
-        ids.append(role_id)   # prompt prefix, never predicted
+        ids.append(role_id)  # prompt prefix, never predicted
         mask.append(0)
 
         content_ids = tokenizer.encode(msg.content)
@@ -120,17 +105,11 @@ def render_chat(
 
 
 def build_prompt(messages: Sequence[Message | dict], tokenizer: MiniTokenizer) -> list[int]:
-    """Token IDs for a generation prompt. The one entry point generation, GRPO
-    and eval share, so sampled text is formatted exactly like SFT data."""
+    """Token IDs for a generation prompt, shared by generation, GRPO and eval."""
     return render_chat(messages, tokenizer, add_generation_prompt=True).ids
 
 
-# --- 4. Packed SFT examples and segment IDs ----------------------------------
-# Several short conversations share one fixed-length row, keeping throughput
-# near pretraining's. Each gets a distinct segment id, which model.py turns
-# into the attention mask, so nothing attends across a boundary. Tail padding
-# takes PAD_SEGMENT and a zero loss mask.
-
+# Tail padding in a packed row takes this segment id and a zero loss mask.
 PAD_SEGMENT = -1
 
 
@@ -199,8 +178,9 @@ def pack_conversations(
 ) -> PackedSFT:
     """Render and greedily pack conversations into [N, seq_len] tensors.
 
-    Each row holds whole conversations (one longer than seq_len+1 is
-    truncated), and is seq_len+1 tokens before the next-token shift.
+    Each row holds whole conversations (one longer than seq_len+1 is truncated)
+    and carries a distinct segment id per conversation, which model.py turns
+    into an attention mask so nothing attends across a boundary.
     """
     capacity = seq_len + 1
     pad_id = tokenizer.pad_id
@@ -241,9 +221,8 @@ def pack_conversations(
     mask_t = torch.tensor(rows_mask, dtype=torch.long)
     seg_t = torch.tensor(rows_seg, dtype=torch.long)
 
-    # Next-token shift: position i predicts i+1, supervised iff that predicted
-    # token is an assistant one (mask[1:]). Segment ids align with the input
-    # positions -- the queries -- hence [:-1].
+    # Next-token shift: position i predicts i+1, supervised iff that token is an
+    # assistant one; segment ids align with the query positions, hence [:-1].
     return PackedSFT(
         input_ids=ids_t[:, :-1].contiguous(),
         targets=ids_t[:, 1:].contiguous(),
@@ -252,11 +231,8 @@ def pack_conversations(
     )
 
 
-# --- 5. SFT loss + 6. SFT training loop --------------------------------------
-
 def sft_loss(model: nn.Module, mb: tuple[torch.Tensor, ...]) -> torch.Tensor:
-    """Cross-entropy over assistant tokens only, with cross-conversation
-    attention blocked by the segment mask (both applied inside model.forward)."""
+    """Cross-entropy over assistant tokens only, isolated by the segment mask."""
     ids, tgt, mask, seg = mb
     _, loss = model(ids, tgt, loss_mask=mask, segment_ids=seg)
     return loss
@@ -271,15 +247,14 @@ def train_sft(
     steps: int | None = None,
     raw_model: nn.Module | None = None,
 ) -> list[float]:
-    """Run SFT for `steps` optimizer steps over `packed` (cycled), reusing the
-    pretraining optimizer/schedule stack. Returns per-step losses."""
+    """Run SFT for `steps` optimizer steps over `packed` (cycled); returns losses."""
     device = torch.device(device)
     raw = raw_model if raw_model is not None else model
     optimizers = build_optimizers(raw, cfg)
     steps = steps if steps is not None else cfg.max_steps
     scheduler = WarmupCosine(optimizers, min(cfg.warmup_steps, max(1, steps // 10)),
                              steps, cfg.lr_floor_frac)
-    amp_dtype = _DTYPES.get(cfg.dtype, torch.float32)
+    amp_dtype = DTYPES.get(cfg.dtype, torch.float32)
 
     packed = packed.to(device)
     micro = list(packed.microbatches(cfg.micro_batch))
@@ -309,19 +284,13 @@ def train_sft(
     return losses
 
 
-# --- 7. GSM8K answer extraction + 8. rewards ---------------------------------
-# GSM8K solutions end with "#### <answer>", so the extractor prefers that
-# delimiter and falls back to the last integer: a model that learns the
-# delimiter is rewarded, a bare number still parses. Format-shaping terms give
-# partial signal before the model is ever correct.
-
 _HASH_ANSWER = re.compile(r"####\s*(-?\d+)")
 _INT = re.compile(r"-?\d+")
 
 
 @dataclass
 class RewardResult:
-    """A reward split into its correctness and format components (for logging)."""
+    """A reward split into its correctness and format components."""
 
     total: float
     correct: float
@@ -329,8 +298,7 @@ class RewardResult:
 
 
 def extract_final_int(text: str) -> int | None:
-    """The answer after a '####' delimiter (GSM8K convention), else the last
-    integer in the text, else None."""
+    """The answer after a '####' delimiter (GSM8K convention), else the last int."""
     m = _HASH_ANSWER.search(text)
     if m:
         return int(m.group(1))
@@ -346,7 +314,7 @@ def _format_score(text: str, *, terminated: bool, n_new_tokens: int, max_new_tok
     return (parseable + term + within) / 3.0
 
 
-def answer_match_reward(
+def gsm8k_reward(
     text: str,
     *,
     gold: int,
@@ -356,8 +324,7 @@ def answer_match_reward(
     w_correct: float = 1.0,
     w_format: float = 0.5,
 ) -> RewardResult:
-    """Exact-match reward on the extracted final integer, plus format shaping.
-    Scores both GSM8K (gold from the dataset) and offline arithmetic."""
+    """Exact match on the extracted final integer, plus format shaping."""
     pred = extract_final_int(text)
     correct = 1.0 if (pred is not None and pred == gold) else 0.0
     fmt = _format_score(
@@ -365,23 +332,6 @@ def answer_match_reward(
     )
     return RewardResult(total=w_correct * correct + w_format * fmt, correct=correct, format=fmt)
 
-
-def gsm8k_reward(
-    text: str,
-    *,
-    gold: int,
-    terminated: bool,
-    n_new_tokens: int,
-    max_new_tokens: int,
-) -> RewardResult:
-    """GSM8K reward: final-integer exact match against the gold answer."""
-    return answer_match_reward(
-        text, gold=gold, terminated=terminated,
-        n_new_tokens=n_new_tokens, max_new_tokens=max_new_tokens,
-    )
-
-
-# --- 9. Group sampling -------------------------------------------------------
 
 # Scores one completion from its decoded text and metadata.
 RewardFn = Callable[["Completion"], float]
@@ -410,9 +360,7 @@ def sample_groups(
     seed: int = 0,
     device: torch.device | str = "cpu",
 ) -> list[Completion]:
-    """Sample group_size completions per prompt. The same seed reproduces the
-    same completions; each prompt takes a distinct sub-seed so its group
-    differs from the others'."""
+    """Sample group_size completions per prompt, each group under its own sub-seed."""
     eos = tokenizer.eos_id
     out: list[Completion] = []
     for gi, msgs in enumerate(prompts):
@@ -443,11 +391,7 @@ def sample_groups(
 
 
 def collate(completions: list[Completion], pad_id: int, device: torch.device | str = "cpu"):
-    """Pad completions to [B, L] and build the completion-token mask.
-
-    Returns (seqs [B, L], comp_mask [B, L], groups [B]). comp_mask is True only
-    on generated tokens, so the policy loss touches only what the model wrote.
-    """
+    """Pad to (seqs [B, L], comp_mask [B, L] true on generated tokens, groups [B])."""
     b = len(completions)
     L = max(len(c.tokens) for c in completions)
     seqs = torch.full((b, L), pad_id, dtype=torch.long)
@@ -461,14 +405,11 @@ def collate(completions: list[Completion], pad_id: int, device: torch.device | s
     return seqs.to(device), comp_mask.to(device), groups.to(device)
 
 
-# --- 10. Group-relative advantage normalization ------------------------------
-
 def group_advantages(rewards: torch.Tensor, groups: torch.Tensor, *, eps: float = 1e-6) -> torch.Tensor:
     """A_i = (r_i - mean_g) / (std_g + eps) within completion i's group g.
 
-    The group mean is the baseline: that is what replaces a learned critic. A
-    zero-variance group gives exactly zero advantage and so zero gradient --
-    equally-good samples push the model neither way.
+    The group mean is the baseline that replaces a learned critic. A
+    zero-variance group gives exactly zero advantage, and so zero gradient.
     """
     groups = groups.to(rewards.device)
     adv = torch.zeros_like(rewards, dtype=torch.float32)
@@ -481,22 +422,14 @@ def group_advantages(rewards: torch.Tensor, groups: torch.Tensor, *, eps: float 
     return adv
 
 
-# --- 11. Token log-probabilities ---------------------------------------------
-
 def token_logprobs(model: nn.Module, seqs: torch.Tensor, target_mask: torch.Tensor):
-    """Per-token log-probs of seqs under model, plus the shifted token mask.
-
-    Returns (logp [B, L-1], mask [B, L-1]): logp[:, t] is the log-prob of the
-    actual next token seqs[:, t+1], and mask marks the completion targets.
-    """
+    """Return (logp [B, L-1] of each actual next token, shifted target mask)."""
     logits, _ = model(seqs)  # targets=None -> full logits path
     logp = torch.log_softmax(logits[:, :-1].float(), dim=-1)   # [B, L-1, V]
     tgt = seqs[:, 1:]                                          # [B, L-1]
     tok_logp = logp.gather(-1, tgt[:, :, None]).squeeze(-1)    # [B, L-1]
     return tok_logp, target_mask[:, 1:]
 
-
-# --- 12. Clipped GRPO objective + 13. GRPO update ----------------------------
 
 def grpo_loss(
     model: nn.Module,
@@ -507,14 +440,11 @@ def grpo_loss(
     *,
     clip_eps: float = 0.2,
 ) -> torch.Tensor:
-    """The clipped PPO surrogate over completion tokens, weighted by the
-    group-relative advantage:
+    """The clipped PPO surrogate over completion tokens, weighted by advantage.
 
-        ratio = exp(logp_new - logp_old)
-        loss  = -mean( min(ratio * A, clip(ratio, 1-eps, 1+eps) * A) )
-
-    Clipping keeps the policy near the one that sampled; min() makes the
-    objective a pessimistic bound.
+    ratio = exp(logp_new - logp_old); the loss is
+    -mean(min(ratio * A, clip(ratio, 1-eps, 1+eps) * A)), a pessimistic bound
+    that keeps the policy near the one that sampled.
     """
     new_logp, m = token_logprobs(model, seqs, comp_mask)
     ratio = torch.exp(new_logp - old_logp)
@@ -565,10 +495,10 @@ def run_grpo(
     seed: int = 0,
     device: torch.device | str = "cpu",
 ) -> list[float]:
-    """The GRPO loop over a prompt_bank of (messages, reward_fn) pairs; returns
-    the mean reward per step. Each step draws prompts_per_step prompts, rolls
-    out group_size completions each, scores them, normalizes within groups, and
-    takes one clipped update."""
+    """Roll out, score, normalize within groups and take one clipped update per step.
+
+    Returns the mean reward per step over a bank of (messages, reward_fn) pairs.
+    """
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.95))
     pad_id = tokenizer.pad_id
     mean_rewards: list[float] = []
@@ -596,8 +526,6 @@ def run_grpo(
     return mean_rewards
 
 
-# --- Prompt banks: GSM8K and offline arithmetic ------------------------------
-
 def _bank_entry(question: str, gold: int, max_new_tokens: int) -> tuple[list[dict], RewardFn]:
     messages = [{"role": "user", "content": question}]
 
@@ -613,11 +541,7 @@ def _bank_entry(question: str, gold: int, max_new_tokens: int) -> tuple[list[dic
 def build_gsm8k_bank(
     *, max_new_tokens: int, split: str = "train", limit: int | None = None,
 ) -> list[tuple[list[dict], RewardFn]]:
-    """A GRPO prompt bank from GSM8K (downloads `openai/gsm8k` on first use).
-
-    Rows are {"question", "answer"}, the answer ending '#### <gold>'. Commas
-    are stripped ('1,200' -> '1200') before extraction.
-    """
+    """A GRPO prompt bank from GSM8K (openai/gsm8k), commas stripped before parsing."""
     ds = load_dataset("openai/gsm8k", "main", split=split)
     bank = []
     for row in ds:
@@ -633,8 +557,7 @@ def build_gsm8k_bank(
 def build_arithmetic_bank(
     n: int, *, max_new_tokens: int, seed: int = 0,
 ) -> list[tuple[list[dict], RewardFn]]:
-    """An offline bank of single-step additions: the same GRPO machinery
-    without a dataset download."""
+    """An offline bank of single-step additions: no dataset download."""
     rng = random.Random(seed)
     bank = []
     for _ in range(n):
@@ -642,8 +565,6 @@ def build_arithmetic_bank(
         bank.append(_bank_entry(f"What is {a} + {b}?", a + b, max_new_tokens))
     return bank
 
-
-# --- 14. CLI: `sft` and `grpo` -----------------------------------------------
 
 def load_conversations(path: str) -> list[list[dict]]:
     """Chat JSONL: one {"messages": [{"role", "content"}, ...]} per line."""
@@ -667,9 +588,7 @@ def _build_model(tier: str, init: str | None, device: str, **overrides: Any) -> 
 
 def main_sft(args: argparse.Namespace) -> int:
     cfg, model = _build_model(args.tier, args.init, args.device)
-    # SFT batches are full-context, so the [B*T, V] logits tensor is worth
-    # avoiding here too.
-    model.fused_loss = getattr(cfg, "use_triton", False)
+    model.fused_loss = cfg.use_triton
     tok = MiniTokenizer.load(args.tokenizer)
 
     convs = (

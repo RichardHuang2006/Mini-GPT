@@ -20,7 +20,21 @@ Transformer, AdamW + Muon pretraining, Triton kernels, SFT, GRPO, and evaluation
 
 Tiers: `nano` (12.5M, 512 ctx), `mini` (39.3M, 1024 ctx), `small` (100.7M, 2048 ctx).
 
+Shape symbols used throughout `model.py` and `kernels.py`: `B` batch,
+`T` sequence (<= `cfg.context`), `D` = `cfg.d_model`, `Hq` = `n_q_heads`,
+`Hkv` = `n_kv_heads`, `d` = `head_dim`, `V` = `vocab_size`.
+
+`kernels.py` has two layers per operation: an eager PyTorch reference (the
+ground truth the tests compare against) and a Triton kernel in an
+`autograd.Function` with a hand-derived backward. The public dispatchers pick
+the kernel on CUDA tensors and the reference everywhere else, so `use_triton=True`
+runs correctly on CPU. `model.py` is the eager reference architecture;
+`cfg.use_triton` routes RMSNorm / RoPE / SwiGLU / the loss through `kernels.py`.
+
 ## Setup
+
+Triton is a hard dependency of `mini_gpt.kernels`, and it ships wheels for
+Linux only, so the package imports on Linux (CPU or CUDA).
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate

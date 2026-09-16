@@ -1,7 +1,4 @@
-"""Autoregressive generation: greedy, temperature, and top-k sampling.
-
-No KV cache -- the full sequence is re-run each step, keeping the loop obvious.
-"""
+"""Autoregressive generation: greedy, temperature, and top-k sampling."""
 
 from __future__ import annotations
 
@@ -31,12 +28,8 @@ def generate(
 ) -> torch.Tensor:
     """Extend idx [B, T0] by up to max_new_tokens tokens; returns [B, T0 + n].
 
-    temperature == 0 is greedy and exactly reproducible; > 0 samples from the
-    tempered softmax, reproducibly when `seed` is given. A row emitting eos_id
-    is frozen, and the loop exits once every row has finished.
-
-    Only the last `context` tokens reach the forward pass, so generation can
-    run past the trained window. Defaults to model.cfg.context.
+    temperature 0 is greedy, > 0 samples (seeded by `seed`). Only the last
+    `context` tokens (default model.cfg.context) reach the forward pass.
     """
     model.eval()
     device = idx.device
@@ -60,7 +53,6 @@ def generate(
         else:
             next_logits = next_logits / temperature
             if top_k is not None:
-                # Keep only the k largest logits; everything else -> -inf.
                 k = min(top_k, next_logits.shape[-1])
                 kth = next_logits.topk(k, dim=-1).values[:, -1, None]
                 next_logits = next_logits.masked_fill(next_logits < kth, float("-inf"))
@@ -92,10 +84,8 @@ def generate_reply(
     top_k: int | None = None,
     seed: int | None = None,
 ) -> str:
-    """Prompt through the chat template; returns the decoded new tokens,
-    truncated at the first <|eos|>."""
-    # Lazy: posttrain.py imports this module for GRPO rollouts, so a top-level
-    # import would be circular.
+    """Prompt through the chat template; returns the reply text up to <|eos|>."""
+    # Deferred: posttrain imports this module, so a top-level import is circular.
     from mini_gpt.posttrain import build_prompt
 
     prompt = build_prompt(messages, tokenizer)
@@ -114,8 +104,6 @@ def generate_reply(
         new_tokens = new_tokens[: new_tokens.index(tokenizer.eos_id)]
     return tokenizer.decode(new_tokens)
 
-
-# --- CLI ---------------------------------------------------------------------
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Generate text from a Mini-GPT checkpoint.")

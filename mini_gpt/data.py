@@ -1,9 +1,4 @@
-"""Dataset preparation: text sources -> tokenizer -> packed uint16 shards.
-
-Three stages, in file order: fetch text into .jsonl parts, pack it into flat
-uint16 shards plus a manifest, then sample fixed-length windows for training.
-Shards are encoded with tokenizer.py's 32K BPE.
-"""
+"""Dataset preparation: text sources -> tokenizer -> packed uint16 shards."""
 
 from __future__ import annotations
 
@@ -16,24 +11,19 @@ from typing import Any, Callable, Iterable, Iterator
 
 from datasets import load_dataset
 import numpy as np
+import tiktoken
 
 from mini_gpt.tokenizer import DEFAULT_VOCAB_SIZE, MiniTokenizer
 
-# Token IDs are stored as uint16: lossless because the vocab is < 65,536, and
-# half the disk and page-cache footprint of int32.
+# uint16 is lossless because the vocab is < 65,536, and half the footprint of int32.
 DTYPE = np.uint16
 PART_TEMPLATE = "part_{:05d}.jsonl"
 SHARD_TEMPLATE = "shard_{:05d}.bin"
 MANIFEST_NAME = "manifest.json"
 
 
-# --- 1. Text sources ---------------------------------------------------------
-# Each source is an iterator of document strings. ClimbMix's official release
-# ships GPT-2 token IDs, hence two HuggingFace paths plus an offline one.
-
 def synthetic_docs(n: int, *, seed: int = 0) -> Iterator[str]:
-    """Deterministic pseudo-text for offline development and tests: not real
-    language, but varied enough to give the BPE trainer real merges."""
+    """Deterministic pseudo-text for offline development and tests."""
     rng = random.Random(seed)
     words = (
         "the quick brown fox jumps over a lazy dog while tensor gradients flow "
@@ -55,11 +45,7 @@ def iter_climbmix_raw(streaming: bool = True) -> Iterator[str]:  # pragma: no co
 
 
 def iter_climbmix_tokens(streaming: bool = True) -> Iterator[str]:  # pragma: no cover - network
-    """Stream NVIDIA's token-ID release (nvidia/Nemotron-ClimbMix), GPT-2
-    detokenized because training a new 32K BPE needs raw text. Needs the
-    optional `tiktoken` package."""
-    import tiktoken  # optional dep: not installed by requirements.txt
-
+    """Stream NVIDIA's ClimbMix token release, GPT-2 detokenized back to raw text."""
     enc = tiktoken.get_encoding("gpt2")
     ds = load_dataset("nvidia/Nemotron-ClimbMix", split="train", streaming=streaming)
     for row in ds:
@@ -82,8 +68,6 @@ def resolve_source(source: str | Callable[[], Iterable[str]] | Iterable[str]) ->
         raise ValueError(f"unknown source {source!r}")
     return source
 
-
-# --- 2. Text parts on disk (fetch) -------------------------------------------
 
 def part_path(out_dir: str | Path, index: int) -> Path:
     return Path(out_dir) / PART_TEMPLATE.format(index)
@@ -110,11 +94,7 @@ def write_parts(
     docs_per_part: int,
     overwrite: bool = False,
 ) -> list[Path]:
-    """Group `texts` into `parts` jsonl files of `docs_per_part` docs each.
-
-    Idempotent: existing part indices are kept unless `overwrite`, so an
-    interrupted download continues instead of re-fetching.
-    """
+    """Group texts into `parts` jsonl files, skipping parts already on disk."""
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -135,8 +115,8 @@ def write_parts(
                 break
         if not docs:
             break  # source exhausted
-        # Atomic via temp file: an interrupted run must not leave a half-written
-        # part that the idempotency check would take for complete.
+        # Write via a temp file so an interrupted run leaves no half-written part
+        # for the idempotency check to mistake for a complete one.
         tmp = path.with_suffix(path.suffix + ".tmp")
         with tmp.open("w", encoding="utf-8") as f:
             for doc in docs:
@@ -148,9 +128,7 @@ def write_parts(
 
 
 def read_parts(parts_dir: str | Path) -> Iterator[str]:
-    """Yield every document across all parts, in part order. Re-reads from disk
-    per call, so the corpus streams twice -- once to train the tokenizer, once
-    to pack -- without ever sitting in RAM."""
+    """Yield every document across all parts, in part order, streaming from disk."""
     for index in existing_part_indices(parts_dir):
         with part_path(parts_dir, index).open("r", encoding="utf-8") as f:
             for line in f:
@@ -158,10 +136,6 @@ def read_parts(parts_dir: str | Path) -> Iterator[str]:
                 if line:
                     yield json.loads(line)["text"]
 
-
-# --- 3. Packed uint16 shards + manifest (pack) -------------------------------
-# One long token stream cut into flat .bin shards. The manifest records the
-# train/val split and the tokenizer fingerprint, so a stale pairing fails loud.
 
 @dataclass
 class ShardInfo:
@@ -201,7 +175,7 @@ def pack_corpus(
     val_shards: int = 1,
     add_eos: bool = True,
 ) -> Manifest:
-    """Encode `docs` into fixed-size uint16 shards plus a manifest.
+    """Encode docs into fixed-size uint16 shards plus a manifest.
 
     An <|eos|> between documents marks the boundaries; the last `val_shards`
     shards become the held-out split, always leaving one train shard.
@@ -259,8 +233,7 @@ def load_manifest(data_dir: str | Path) -> Manifest:
 
 
 def open_shard(path: str | Path) -> np.memmap:
-    """Memory-map a shard read-only: windows are sliced from the OS page cache,
-    so no shard is ever fully loaded into RAM."""
+    """Memory-map a shard read-only, so windows come from the OS page cache."""
     return np.memmap(path, dtype=DTYPE, mode="r")
 
 
@@ -277,18 +250,11 @@ def verify_against_tokenizer(data_dir: str | Path, tokenizer: MiniTokenizer) -> 
     return load_manifest(data_dir).tokenizer_fingerprint == tokenizer.fingerprint()
 
 
-# --- 4. Windowed sampling (sample) -------------------------------------------
-
 class ShardSampler:
-    """Seeded, restartable sampler of `context + 1`-token windows over one
-    split: the first `context` are inputs, the same window shifted by one is
-    targets.
+    """Seeded, restartable sampler of context+1-token windows over one split.
 
-    A window lies entirely within one shard, chosen with probability
-    proportional to its valid start positions, then a uniform start inside it.
-    Both draws come from one seeded generator, so the stream is a pure function
-    of (seed, draws so far) -- which is what reproduces the data order exactly
-    when a run picks up from a checkpoint.
+    A window lies within one shard, drawn with probability proportional to its
+    valid start positions, then at a uniform start inside it.
     """
 
     def __init__(
@@ -313,7 +279,6 @@ class ShardSampler:
         self.shard_names = [s.name for s in infos]
         self._shards = [open_shard(self.data_dir / s.name) for s in infos]
 
-        # Valid start positions per shard: len - window + 1 (0 if too short).
         starts = np.array(
             [max(0, len(m) - self.window + 1) for m in self._shards], dtype=np.int64
         )
@@ -328,18 +293,16 @@ class ShardSampler:
         self.position = 0  # number of windows drawn so far
 
     def next_window(self) -> np.ndarray:
-        """One `[context + 1]` int64 window (inputs and targets share it)."""
+        """One [context + 1] int64 window (inputs and targets share it)."""
         shard_idx = int(self.rng.choice(len(self._shards), p=self._probs))
         start = int(self.rng.integers(0, self._start_counts[shard_idx]))
         self.position += 1
         return np.asarray(self._shards[shard_idx][start : start + self.window], dtype=np.int64)
 
     def next_batch(self, batch_size: int) -> np.ndarray:
-        """A `[batch_size, context + 1]` int64 array of stacked windows."""
+        """A [batch_size, context + 1] int64 array of stacked windows."""
         return np.stack([self.next_window() for _ in range(batch_size)])
 
-    # --- persistence: rides along in checkpoints so a restarted run carries
-    # on through the window stream instead of replaying or skipping data.
     def state_dict(self) -> dict[str, Any]:
         return {
             "seed": self.seed,
@@ -355,8 +318,6 @@ class ShardSampler:
         self.position = state["position"]
         self.rng.bit_generator.state = state["rng_state"]
 
-
-# --- 5. CLI: fetch -> train tokenizer -> pack --------------------------------
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
@@ -381,7 +342,6 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--overwrite", action="store_true", help="re-fetch parts even if present")
     args = ap.parse_args(argv)
 
-    # 1. fetch text parts
     written = write_parts(
         args.parts_dir,
         resolve_source(args.source),
@@ -391,14 +351,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(f"parts: {len(written)} in {args.parts_dir}")
 
-    # 2. train and save the byte-level BPE
     tok = MiniTokenizer.train(
         read_parts(args.parts_dir), vocab_size=args.vocab_size, min_frequency=args.min_frequency
     )
     tok.save(args.tokenizer)
     print(f"tokenizer: {tok.vocab_size} tokens -> {args.tokenizer}")
 
-    # 3. pack to uint16 shards + manifest
     manifest = pack_corpus(
         read_parts(args.parts_dir),
         tok,
