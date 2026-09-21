@@ -9,7 +9,7 @@ from typing import NamedTuple
 def swiglu_hidden(d_model: int, multiple: int = 128) -> int:
     """SwiGLU hidden width ~= 8/3 * d_model, rounded to a multiple of 128."""
     target = (8 * d_model) / 3
-    return int(round(target / multiple)) * multiple
+    return round(target / multiple) * multiple
 
 
 class ParamCount(NamedTuple):
@@ -117,7 +117,7 @@ class Config:
         total = non_embedding + embedding
         return ParamCount(total=total, embedding=embedding, non_embedding=non_embedding)
 
-    def with_overrides(self, **kwargs) -> "Config":
+    def with_overrides(self, **kwargs) -> Config:
         """Return a re-validated copy with fields replaced."""
         return replace(self, **kwargs)
 

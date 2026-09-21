@@ -9,14 +9,14 @@ import os
 import subprocess
 import sys
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
 
-from datasets import load_dataset
 import numpy as np
 import torch
 import torch.nn.functional as F
+from datasets import load_dataset
 from torch import nn
 
 from mini_gpt.config import get_config

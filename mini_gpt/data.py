@@ -5,13 +5,14 @@ from __future__ import annotations
 import argparse
 import json
 import random
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable, Iterator
+from typing import Any
 
-from datasets import load_dataset
 import numpy as np
 import tiktoken
+from datasets import load_dataset
 
 from mini_gpt.tokenizer import DEFAULT_VOCAB_SIZE, MiniTokenizer
 
@@ -157,7 +158,7 @@ class Manifest:
         return json.dumps(asdict(self), indent=2)
 
     @classmethod
-    def from_json(cls, text: str) -> "Manifest":
+    def from_json(cls, text: str) -> Manifest:
         d = json.loads(text)
         d["shards"] = [ShardInfo(**s) for s in d["shards"]]
         return cls(**d)

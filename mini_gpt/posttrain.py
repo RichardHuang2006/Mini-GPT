@@ -6,12 +6,13 @@ import argparse
 import json
 import random
 import re
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterator, Literal, Sequence
+from typing import Any, Literal
 
-from datasets import load_dataset
 import torch
+from datasets import load_dataset
 from torch import nn
 
 from mini_gpt.config import Config, get_config
@@ -152,7 +153,7 @@ class PackedSFT:
     def seq_len(self) -> int:
         return self.input_ids.shape[1]
 
-    def to(self, device) -> "PackedSFT":
+    def to(self, device) -> PackedSFT:
         return PackedSFT(
             self.input_ids.to(device),
             self.targets.to(device),
@@ -569,7 +570,7 @@ def build_arithmetic_bank(
 def load_conversations(path: str) -> list[list[dict]]:
     """Chat JSONL: one {"messages": [{"role", "content"}, ...]} per line."""
     convs = []
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             line = line.strip()
             if line:

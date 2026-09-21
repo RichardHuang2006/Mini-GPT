@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterable, Sequence
 from pathlib import Path
-from typing import Iterable, Sequence
 
 from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
 
@@ -42,7 +42,7 @@ class MiniTokenizer:
         vocab_size: int = DEFAULT_VOCAB_SIZE,
         *,
         min_frequency: int = 2,
-    ) -> "MiniTokenizer":
+    ) -> MiniTokenizer:
         """Learn merges over the 256-byte alphabet plus the special tokens."""
         backend = Tokenizer(models.BPE(unk_token=None))
         # add_prefix_space=False keeps encode->decode an exact identity.
@@ -65,7 +65,7 @@ class MiniTokenizer:
         self._tok.save(str(path))
 
     @classmethod
-    def load(cls, path: str | Path) -> "MiniTokenizer":
+    def load(cls, path: str | Path) -> MiniTokenizer:
         return cls(Tokenizer.from_file(str(path)))
 
     def encode(self, text: str, *, add_bos: bool = False, add_eos: bool = False) -> list[int]:
