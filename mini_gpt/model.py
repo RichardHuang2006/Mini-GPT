@@ -186,8 +186,7 @@ class Block(nn.Module):
         seg_equal: torch.Tensor | None = None,
     ) -> torch.Tensor:
         x = x + self.attn(self.attn_norm(x), cos, sin, seg_equal)
-        x = x + self.mlp(self.mlp_norm(x))
-        return x
+        return x + self.mlp(self.mlp_norm(x))
 
 
 class MiniGPT(nn.Module):
@@ -228,7 +227,7 @@ class MiniGPT(nn.Module):
         loss_mask: torch.Tensor | None = None,
         segment_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-        b, t = idx.shape  # token IDs: [B, T]
+        _b, t = idx.shape  # token IDs: [B, T]
         cos, sin = precompute_rope(
             self.cfg.head_dim, t, self.cfg.rope_base,
             device=idx.device, dtype=self.embed.weight.dtype,

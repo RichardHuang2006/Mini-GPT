@@ -176,8 +176,8 @@ class WarmupCosine:
 
     def _apply(self) -> None:
         m = lr_multiplier(self.last_step, self.warmup, self.max_steps, self.floor_frac)
-        for opt, bases in zip(self.optimizers, self.base_lrs):
-            for group, base in zip(opt.param_groups, bases):
+        for opt, bases in zip(self.optimizers, self.base_lrs, strict=True):
+            for group, base in zip(opt.param_groups, bases, strict=True):
                 group["lr"] = base * m
 
     def step(self) -> None:
@@ -268,7 +268,7 @@ def load_checkpoint(
     payload = torch.load(str(path), map_location="cpu", weights_only=False)
     model.load_state_dict(payload["model"])
     if optimizers is not None:
-        for opt, state in zip(optimizers, payload["optimizers"]):
+        for opt, state in zip(optimizers, payload["optimizers"], strict=True):
             opt.load_state_dict(state)
     if scheduler is not None:
         scheduler.load_state_dict(payload["scheduler"])
@@ -321,14 +321,12 @@ def train(
         device=device,
     )
     val_data = None
-    try:
+    with contextlib.suppress(ValueError):  # tiny corpus with no val shard
         val_data = DataStream(
             ShardSampler(data_dir, context=cfg.context, split="val", seed=cfg.seed),
             cfg.micro_batch,
             device=device,
         )
-    except ValueError:
-        pass  # tiny corpus with no val shard
 
     raw_model = MiniGPT(cfg).to(device)
     raw_model.fused_loss = cfg.use_triton

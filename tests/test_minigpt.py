@@ -14,8 +14,7 @@ from torch import nn
 
 from mini_gpt import data as data_mod
 from mini_gpt import evaluate as eval_mod
-from mini_gpt import kernels
-from mini_gpt import posttrain
+from mini_gpt import kernels, posttrain
 from mini_gpt.config import TIERS, Config, get_config
 from mini_gpt.generate import generate, generate_reply
 from mini_gpt.model import (
@@ -30,8 +29,6 @@ from mini_gpt.model import (
 )
 from mini_gpt.tokenizer import DEFAULT_VOCAB_SIZE, SPECIAL_TOKENS, MiniTokenizer
 from mini_gpt.train import (
-    DataStream,
-    Muon,
     WarmupCosine,
     build_optimizers,
     classify_parameters,
@@ -465,7 +462,9 @@ def test_checkpoint_saves_and_loads_all_state(tmp_path):
                               scheduler=sched2)
     assert payload["step"] == 1 and payload["sampler"] == {"marker": 1}
     assert sched2.last_step == 1
-    for (n, a), (_, b) in zip(model.named_parameters(), model2.named_parameters()):
+    for (n, a), (_, b) in zip(
+        model.named_parameters(), model2.named_parameters(), strict=True
+    ):
         assert torch.equal(a, b), n
 
 
@@ -526,7 +525,7 @@ def _compare_fwd_bwd(fn_kernel, fn_ref, inputs, atol):
     upstream = torch.randn_like(out_r)
     out_k.backward(upstream)
     out_r.backward(upstream.clone())
-    for tk, tr in zip(ins_k, ins_r):
+    for tk, tr in zip(ins_k, ins_r, strict=True):
         if tk.requires_grad:
             assert torch.allclose(tk.grad, tr.grad, atol=atol), "gradient mismatch"
 

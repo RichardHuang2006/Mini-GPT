@@ -11,13 +11,13 @@ IGNORE_INDEX = -100
 DEFAULT_CHUNK = 8192
 
 __all__ = [
+    "apply_rope",
+    "chunked_cross_entropy",
     "rmsnorm",
     "rmsnorm_reference",
-    "apply_rope",
     "rope_reference",
     "swiglu",
     "swiglu_reference",
-    "chunked_cross_entropy",
 ]
 
 
@@ -114,7 +114,7 @@ def rope_reference(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> tor
 
 
 @triton.jit
-def _rope_kernel(X, COS, SIN, O, T, D, HALF, BLOCK: tl.constexpr):
+def _rope_kernel(X, COS, SIN, OUT, T, D, HALF, BLOCK: tl.constexpr):
     # One program per (B*H*T) row. cos/sin stay [T, d]: no expanded copies.
     row = tl.program_id(0)
     pos = row % T  # position index into cos/sin (contiguous [.., T, D] layout)
@@ -132,7 +132,7 @@ def _rope_kernel(X, COS, SIN, O, T, D, HALF, BLOCK: tl.constexpr):
     x_rot = tl.load(X + row * D + shifted, mask=mask, other=0.0).to(tl.float32)
     sign = tl.where(cols < HALF, -1.0, 1.0)
 
-    tl.store(O + row * D + cols, x * cos + sign * x_rot * sin, mask=mask)
+    tl.store(OUT + row * D + cols, x * cos + sign * x_rot * sin, mask=mask)
 
 
 def _rope_apply_triton(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
