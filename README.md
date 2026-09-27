@@ -86,7 +86,3 @@ for a GPU run. Results land in `out/eval/results.json` and `results.md`.
 python -m pytest -q                          # full suite
 CUDA_VISIBLE_DEVICES="" python -m pytest -q  # CPU only; CUDA tests skip
 ```
-
-## License
-
-MIT. See [LICENSE](LICENSE).
